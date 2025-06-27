@@ -22,7 +22,8 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# ─────────────────── Instalación dinámica (solo Colab) ────────────────────
+# ─────────────────── Directorios y configuración ────────────────────
+# 1) Instalación dinámica en Colab
 if "google.colab" in sys.modules:
     get_ipython()  # type: ignore
     !pip install -q requests pandas beautifulsoup4 gspread gspread_dataframe PyDrive typing_extensions unidecode
@@ -31,12 +32,15 @@ if "google.colab" in sys.modules:
     auth.authenticate_user()
     BASE_DIR = "/content/drive/My Drive/preciosfrutiort"
 else:
-    BASE_DIR = os.path.expanduser("~/preciosfrutiort")
+    # 2) En Actions/local: usar variable BASE_DIR o el cwd del repo
+    BASE_DIR = os.environ.get("BASE_DIR", os.getcwd())
 
-# ───────────────────────── Constantes ──────────────────────────────────────
-FILE_TAG         = "frutihort"
-OUT_DIR          = BASE_DIR
-PATTERN_DAILY    = os.path.join(OUT_DIR, f"* _canasta_{FILE_TAG}_*.csv")
+# Todos los CSV se guardarán en ./out para que GitHub Actions los encuentre
+OUT_DIR       = os.path.join(BASE_DIR, "out")
+FILE_TAG      = "frutihort"
+PATTERN_DAILY = os.path.join(OUT_DIR, f"*canasta_{FILE_TAG}_*.csv")
+
+# Resto de constantes
 CREDS_JSON       = os.path.join(BASE_DIR, "cosmic-ascent-464210-p8-c5c205253ac8.json")
 SPREADSHEET_URL  = "https://docs.google.com/spreadsheets/d/10zIOm2Ks2vVtg6JH_A9_IHdyAGzcAsN32azbfaxbVnk"
 WORKSHEET_NAME   = "precios_supermercados"
@@ -76,7 +80,6 @@ SUBGROUP_KEYWORDS: Dict[str, List[str]] = {
     "Uva":           ["uva", "uvas"],
     "Huevo Gallina": ["huevo", "gallina"],
     "Huevo Codorniz":["codorniz"],
-    # … añadir más subgrupos según necesidad …
 }
 SUBGROUP_TOKENS: Dict[str, Set[str]] = {
     sg: {strip_accents(w) for w in ws} for sg, ws in SUBGROUP_KEYWORDS.items()
@@ -84,13 +87,11 @@ SUBGROUP_TOKENS: Dict[str, Set[str]] = {
 
 def classify(name: str) -> tuple[str | None, str | None]:
     toks = set(tokenize(name))
-    # Nivel 1: grupo amplio
     grp = None
     for g, ks in BROAD_GROUP_TOKENS.items():
         if toks & ks:
             grp = g
             break
-    # Nivel 2: subgrupo detallado
     sub = None
     for sg, ks in SUBGROUP_TOKENS.items():
         if toks & ks:
@@ -104,10 +105,6 @@ _unit_re = re.compile(
     re.IGNORECASE
 )
 def extract_unit(name: str) -> str:
-    """
-    Busca la primera ocurrencia de cantidad+unidad en el nombre,
-    devuelve algo como '26GR', '2.5KG', o '' si no encuentra.
-    """
     m = _unit_re.search(name)
     if not m:
         return ""
