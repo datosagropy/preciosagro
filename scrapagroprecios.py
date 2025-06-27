@@ -522,10 +522,7 @@ def main(argv: List[str] | None = None) -> int:
         # y que al final haces sys.exit(main()).
         # …   
         return 0
-    except Exception as e:
-        # Si hay cualquier excepción, la capturamos y salimos 0
-        print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
-        return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
