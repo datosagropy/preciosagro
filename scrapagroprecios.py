@@ -474,6 +474,9 @@ def _write_sheet(ws, df: pd.DataFrame) -> None:
     ws.clear()
     set_with_dataframe(ws, df, include_index=False)
 
+
+def main(argv: List[str] | None = None) -> int:
+    try:
 def main(argv: List[str] | None = None) -> int:
     objetivos = _parse_args(argv if argv is not None else sys.argv[1:])
     registros: List[Dict] = []
@@ -513,8 +516,7 @@ def main(argv: List[str] | None = None) -> int:
     print(f"✅ Hoja actualizada: {len(base)} filas totales")
     return 0
 
-def main(argv: List[str] | None = None) -> int:
-    try:
+
         # … tu implementación original de main …
         # Asegúrate de que las llamadas a scraper.save_csv() usan OUT_DIR,
         # y que al final haces sys.exit(main()).
