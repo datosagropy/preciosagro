@@ -1,0 +1,7 @@
+requests
+pandas
+beautifulsoup4
+gspread
+google-auth
+typing-extensions
+unidecode
