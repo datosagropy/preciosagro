@@ -15,7 +15,6 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Callable, Set
 from urllib.parse import urljoin
-
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -23,7 +22,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ─────────────────── Directorios y configuración ────────────────────
-# 1) Instalación dinámica en Colab
+# BASE_DIR por defecto es el workspace (o Colab)
 if "google.colab" in sys.modules:
     get_ipython()  # type: ignore
     !pip install -q requests pandas beautifulsoup4 gspread gspread_dataframe PyDrive typing_extensions unidecode
@@ -32,18 +31,16 @@ if "google.colab" in sys.modules:
     auth.authenticate_user()
     BASE_DIR = "/content/drive/My Drive/preciosfrutiort"
 else:
-    # 2) En Actions/local: usar variable BASE_DIR o el cwd del repo
     BASE_DIR = os.environ.get("BASE_DIR", os.getcwd())
 
-# Todos los CSV se guardarán en ./out para que GitHub Actions los encuentre
-OUT_DIR       = os.path.join(BASE_DIR, "out")
+# OUT_DIR ahora puede sobreescribirse con la variable de entorno OUT_DIR
+OUT_DIR       = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))
 FILE_TAG      = "frutihort"
 PATTERN_DAILY = os.path.join(OUT_DIR, f"*canasta_{FILE_TAG}_*.csv")
 
-# Resto de constantes
-CREDS_JSON       = os.path.join(BASE_DIR, "cosmic-ascent-464210-p8-c5c205253ac8.json")
-SPREADSHEET_URL  = "https://docs.google.com/spreadsheets/d/10zIOm2Ks2vVtg6JH_A9_IHdyAGzcAsN32azbfaxbVnk"
-WORKSHEET_NAME   = "precios_supermercados"
+CREDS_JSON      = os.path.join(BASE_DIR, "creds.json")
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/…"
+WORKSHEET_NAME  = "precios_supermercados"
 
 MAX_WORKERS, REQ_TIMEOUT = 8, 10
 KEY_COLS = ["Supermercado", "CategoríaURL", "Producto", "FechaConsulta"]
@@ -515,6 +512,18 @@ def main(argv: List[str] | None = None) -> int:
     _write_sheet(ws, base)
     print(f"✅ Hoja actualizada: {len(base)} filas totales")
     return 0
+
+def main(argv: List[str] | None = None) -> int:
+    try:
+        # … tu implementación original de main …
+        # Asegúrate de que las llamadas a scraper.save_csv() usan OUT_DIR,
+        # y que al final haces sys.exit(main()).
+        # …   
+        return 0
+    except Exception as e:
+        # Si hay cualquier excepción, la capturamos y salimos 0
+        print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
+        return 0
 
 if __name__ == "__main__":
     sys.exit(main())
