@@ -3,7 +3,7 @@ name: 🥕 Run Precios-Scraper
 # Se ejecuta cada día a las 02:00 UTC y también puede dispararse manualmente
 on:
   schedule:
-    - cron:  '0 2 * * *'
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
 jobs:
@@ -13,40 +13,49 @@ jobs:
     env:
       BASE_DIR: ${{ github.workspace }}
       CREDS_JSON: creds.json
-      SPREADSHEET_URL: https://docs.google.com/spreadsheets/d/…  # pon tu URL
+      # Mejor poner la URL en Secrets y referenciarla aquí:
+      SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
       WORKSHEET_NAME: precios_supermercados
       FILE_TAG: frutihort
+
     steps:
       # 1) Clonar tu código
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      # 2) Instalar Python
+      # 2) Cachear pip para acelerar futuras ejecuciones
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+
+      # 3) Instalar Python
       - name: Setup Python 3.9
         uses: actions/setup-python@v4
         with:
           python-version: "3.9"
 
-      # 3) Instalar dependencias
+      # 4) Instalar dependencias
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 4) Escribir credenciales de Google desde el Secret
+      # 5) Escribir credenciales de Google desde el Secret
       - name: Configurar credenciales de Google
         run: |
           echo "${{ secrets.GOOGLE_CREDENTIALS }}" > creds.json
 
-      # 5) Ejecutar tu scraper
+      # 6) Ejecutar tu scraper
       - name: Ejecutar scraper.py
         run: |
           python scraper.py
 
-      # (Opcional) 6) Archivarlo como artefacto si quieres guardarlo
+      # 7) Publicar CSVs como artefacto
       - name: Publicar CSV como artefacto
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: precios-artefacto
-          path: '*.csv'
+          name: precios-csv
+          path: out/**/*.csv
