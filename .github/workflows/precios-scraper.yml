@@ -2,14 +2,16 @@ name: 🥕 Run Precios-Scraper
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron:  '0 2 * * *'
   workflow_dispatch:
 
 jobs:
   scrape:
+    name: Ejecutar Scraper
     runs-on: ubuntu-latest
     env:
       BASE_DIR: ${{ github.workspace }}
+      OUT_DIR: ${{ github.workspace }}/out
       CREDS_JSON: creds.json
       SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
       WORKSHEET_NAME: precios_supermercados
@@ -19,16 +21,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Cache pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-
       - name: Setup Python 3.9
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: "3.9"
 
       - name: Instalar dependencias
         run: |
@@ -36,15 +32,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Configurar credenciales de Google
-        run: |
-          echo "${{ secrets.GOOGLE_CREDENTIALS }}" > creds.json
+        run: echo "${{ secrets.GOOGLE_CREDENTIALS }}" > creds.json
 
       - name: Ejecutar scraper.py
         run: python scraper.py
 
-      - name: Publicar CSV como artefacto
+      - name: Publicar CSVs como artefacto
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: precios-csv
-          path: '*.csv'
+          name: precios-artefacto
+          path: out/*.csv
