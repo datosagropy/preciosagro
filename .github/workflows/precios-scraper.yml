@@ -1,5 +1,4 @@
 name: 🥕 Run Precios-Scraper
-
 on:
   schedule:
     - cron:  '0 2 * * *'
@@ -7,35 +6,36 @@ on:
 
 jobs:
   scrape:
-    name: Ejecutar Scraper
     runs-on: ubuntu-latest
     env:
       BASE_DIR: ${{ github.workspace }}
-      OUT_DIR: ${{ github.workspace }}/out
-      CREDS_JSON: creds.json
-      SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
-      WORKSHEET_NAME: precios_supermercados
+      OUT_DIR:  ${{ github.workspace }}/out
       FILE_TAG: frutihort
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Setup Python 3.9
+      - name: Mostrar estructura del repo
+        run: ls -R
+
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.9"
+          python-version: '3.9'
 
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Configurar credenciales de Google
-        run: echo "${{ secrets.GOOGLE_CREDENTIALS }}" > creds.json
+      - name: Añadir credenciales Google
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+        run: echo "$GOOGLE_CREDENTIALS" > creds.json
 
-      - name: Ejecutar scraper.py
-        run: python scraper.py
+      - name: Ejecutar scraper
+        run: |
+          python tools/scraper/scraper.py     # ← ajusta la ruta
 
       - name: Publicar CSVs como artefacto
         if: always()
