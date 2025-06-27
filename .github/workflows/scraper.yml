@@ -46,7 +46,7 @@ jobs:
       # (Opcional) 6) Archivarlo como artefacto si quieres guardarlo
       - name: Publicar CSV como artefacto
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: precios-artefacto
           path: '*.csv'
