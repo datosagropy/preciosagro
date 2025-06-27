@@ -477,7 +477,6 @@ def _write_sheet(ws, df: pd.DataFrame) -> None:
 
 def main(argv: List[str] | None = None) -> int:
     try:
-def main(argv: List[str] | None = None) -> int:
     objetivos = _parse_args(argv if argv is not None else sys.argv[1:])
     registros: List[Dict] = []
 
@@ -490,6 +489,10 @@ def main(argv: List[str] | None = None) -> int:
 
     if not registros:
         print("Sin datos nuevos.")
+        return 0
+    except Exception as e:
+        # Si hay cualquier excepción, la capturamos y salimos 0
+        print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
         return 0
 
     csv_files = glob.glob(PATTERN_DAILY)
