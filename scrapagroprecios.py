@@ -342,5 +342,6 @@ def main(argv: List[str] = None) -> int:
     except Exception as e:
         print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
         return 1
-        if __name__ == "__main__":
+        
+if __name__ == "__main__":
             sys.exit(main())
