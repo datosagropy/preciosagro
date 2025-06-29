@@ -297,29 +297,51 @@ def _write_sheet(ws,df:pd.DataFrame)->None:
     from gspread_dataframe import set_with_dataframe
     ws.clear(); set_with_dataframe(ws,df,include_index=False)
 
-def main(argv:List[str]|None=None)->int:
+def main(argv: List[str] = None) -> int:
     try:
-        objetivos=_parse_args(argv if argv is not None else sys.argv[1:]);registros:List[Dict]=[]
-        for k in objetivos:
-            scraper=SCRAPERS[k]();filas=scraper.scrape();scraper.save_csv(filas);registros.extend(filas);print(f"• {k:<11}: {len(filas):>5} filas")
-        if not registros: print("Sin datos nuevos.");return 0
-        csv_files=glob.glob(PATTERN_DAILY)
-        if not csv_files: print("⚠️ No se encontraron CSV para concatenar.");return 0
-        df_all=pd.concat([pd.read_csv(f,dtype=str) for f in csv_files],ignore_index=True,sort=False)
-        df_all["Precio"]=pd.to_numeric(df_all["Precio"],errors="coerce")
-        df_all["FechaConsulta"]=pd.to_datetime(df_all["FechaConsulta"],errors="coerce")
-        ws,df_prev=_open_sheet()
-        base=pd.concat([df_prev,df_all],ignore_index=True,sort=False)
-        base.sort_values("FechaConsulta",inplace=True)
-        base["FechaConsulta"]=base["FechaConsulta"].dt.strftime("%Y-%m-%d")
-        base.drop_duplicates(KEY_COLS,keep="first",inplace=True)
-        if "ID" in base.columns: base.drop(columns=["ID"],inplace=True)
-        base.insert(0,"ID",range(1,len(base)+1))
-        _write_sheet(ws,base)
-        print(f"✅ Hoja actualizada: {len(base)} filas totales")
+        args = _parse_args(argv if argv is not None else sys.argv[1:])
+        all_records: List[Dict] = []
+        for key in args:
+            scraper = SCRAPERS[key]()
+            rows = scraper.scrape()
+            scraper.save_csv(rows)
+            all_records.extend(rows)
+        if not all_records:
+            print("Sin datos nuevos.")
+            return 0
+
+        files = glob.glob(PATTERN_DAILY)
+        if not files:
+            print("⚠️ No se encontraron CSV para concatenar.")
+            return 0
+
+        df_combined = pd.concat(
+            [pd.read_csv(f, dtype=str) for f in files],
+            ignore_index=True,
+            sort=False
+        )
+        df_combined["Precio"] = pd.to_numeric(df_combined["Precio"], errors="coerce")
+        df_combined["FechaConsulta"] = pd.to_datetime(
+            df_combined["FechaConsulta"], errors="coerce"
+        )
+
+        ws, prev_df = _open_sheet()
+        merged = pd.concat([prev_df, df_combined], ignore_index=True, sort=False)
+        merged.sort_values("FechaConsulta", inplace=True)
+        merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d")
+        merged.drop_duplicates(KEY_COLS, keep="first", inplace=True)
+
+        if "ID" in merged.columns:
+            merged.drop(columns=["ID"], inplace=True)
+        merged.insert(0, "ID", range(1, len(merged) + 1))
+
+        _write_sheet(ws, merged)
+        print(f"✅ Hoja actualizada: {len(merged)} filas totales")
         return 0
+
     except Exception as e:
-        print(f"⚠️ Error inesperado en scraper: {e}",file=sys.stderr)
+        print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
         return 1
 
-if __name__=="__main__": sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())
