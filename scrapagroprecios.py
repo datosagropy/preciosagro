@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*- 
 """
 Scraper unificado de precios – Py 3.7+
-Autor  : Diego B. Meza · Rev: 2025-06-27
-Adaptado para: múltiples categorías con subgrupo y unidad de medida
+Autor  : Diego B. Meza · Rev: 2025-06-29
+Adaptado para ejecutarse en GitHub Actions
 """
 
-from __future__ import annotations
 import os
 import sys
 import glob
@@ -15,6 +14,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Callable, Set
 from urllib.parse import urljoin
+
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -22,26 +22,34 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ─────────────────── Directorios y configuración ────────────────────
-# BASE_DIR por defecto es el workspace (o Colab)
-if "google.colab" in sys.modules:
-    get_ipython()  # type: ignore
-    !pip install -q requests pandas beautifulsoup4 gspread gspread_dataframe PyDrive typing_extensions unidecode
-    from google.colab import drive, auth
-    drive.mount("/content/drive")
-    auth.authenticate_user()
-    BASE_DIR = "/content/drive/My Drive/preciosfrutiort"
-else:
-    BASE_DIR = os.environ.get("BASE_DIR", os.getcwd())
 
-# OUT_DIR ahora puede sobreescribirse con la variable de entorno OUT_DIR
-OUT_DIR       = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))
+# 1) BASE_DIR y OUT_DIR desde entorno o cwd
+BASE_DIR = os.environ.get("BASE_DIR", os.getcwd())
+OUT_DIR = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))
+
+# 2) Credenciales Google desde secreto en GH Actions
+if os.environ.get("GITHUB_ACTIONS") == "true":
+    creds_json = os.environ.get("GCP_CREDENTIALS_JSON")
+    if creds_json:
+        with open("creds.json", "w", encoding="utf-8") as f:
+            f.write(creds_json)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath("creds.json")
+
+CREDS_JSON = os.environ.get(
+    "CREDS_JSON_PATH",
+    os.path.join(BASE_DIR, "creds.json")
+)
+
+# 3) URL y hoja de Google Sheets desde entorno
+SPREADSHEET_URL = os.environ.get(
+    "SPREADSHEET_URL",
+    "https://docs.google.com/spreadsheets/d/10zIOm2Ks2vVtg6JH_A9_IHdyAGzcAsN32azbfaxbVnk"
+)
+WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "precios_supermercados")
+
+# 4) Otros parámetros
 FILE_TAG      = "frutihort"
 PATTERN_DAILY = os.path.join(OUT_DIR, f"*canasta_{FILE_TAG}_*.csv")
-
-CREDS_JSON      = os.path.join(BASE_DIR, "creds.json")
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/…"
-WORKSHEET_NAME  = "precios_supermercados"
-
 MAX_WORKERS, REQ_TIMEOUT = 8, 10
 KEY_COLS = ["Supermercado", "CategoríaURL", "Producto", "FechaConsulta"]
 
@@ -64,9 +72,7 @@ BROAD_GROUP_KEYWORDS: Dict[str, List[str]] = {
     "Leches":      ["leche", "yogur", "yogurt", "bebible", "condensada", "polvo", "natalina"],
     "Quesos":      ["queso", "quesos", "rallado", "parmesano", "muzzarella", "sandwich", "paraguay"],
 }
-BROAD_GROUP_TOKENS: Dict[str, Set[str]] = {
-    g: {strip_accents(w) for w in ws} for g, ws in BROAD_GROUP_KEYWORDS.items()
-}
+BROAD_GROUP_TOKENS = {g: {strip_accents(w) for w in ws} for g, ws in BROAD_GROUP_KEYWORDS.items()}
 
 SUBGROUP_KEYWORDS: Dict[str, List[str]] = {
     "Naranja":       ["naranja", "naranjas"],
@@ -78,22 +84,12 @@ SUBGROUP_KEYWORDS: Dict[str, List[str]] = {
     "Huevo Gallina": ["huevo", "gallina"],
     "Huevo Codorniz":["codorniz"],
 }
-SUBGROUP_TOKENS: Dict[str, Set[str]] = {
-    sg: {strip_accents(w) for w in ws} for sg, ws in SUBGROUP_KEYWORDS.items()
-}
+SUBGROUP_TOKENS = {sg: {strip_accents(w) for w in ws} for sg, ws in SUBGROUP_KEYWORDS.items()}
 
 def classify(name: str) -> tuple[str | None, str | None]:
     toks = set(tokenize(name))
-    grp = None
-    for g, ks in BROAD_GROUP_TOKENS.items():
-        if toks & ks:
-            grp = g
-            break
-    sub = None
-    for sg, ks in SUBGROUP_TOKENS.items():
-        if toks & ks:
-            sub = sg
-            break
+    grp = next((g for g, ks in BROAD_GROUP_TOKENS.items() if toks & ks), None)
+    sub = next((sg for sg, ks in SUBGROUP_TOKENS.items() if toks & ks), None)
     return grp, sub
 
 # ────────────────── 3. Extracción de unidad ─────────────────────────────
@@ -188,6 +184,103 @@ class HtmlSiteScraper:
         os.makedirs(OUT_DIR, exist_ok=True)
         fn = f"{self.name}_canasta_{FILE_TAG}_{datetime.now():%Y%m%d_%H%M%S}.csv"
         pd.DataFrame(rows).to_csv(os.path.join(OUT_DIR, fn), index=False)
+
+# ────────────────── 7. Scrapers por sitio ─────────────────────────────────
+# (Aquí mantengo todas las clases StockScraper, SuperseisScraper, SalemmaScraper,
+#  AreteScraper, JardinesScraper y BiggieScraper sin cambios.)
+
+# … (omitido por brevedad, copia las clases definidas originalmente) …
+
+SCRAPERS: Dict[str, Callable[[], object]] = {
+    "stock": StockScraper,
+    "superseis": SuperseisScraper,
+    "salemma": SalemmaScraper,
+    "arete": AreteScraper,
+    "losjardines": JardinesScraper,
+    "biggie": BiggieScraper,
+}
+
+def _parse_args(argv: List[str] | None = None) -> List[str]:
+    if argv is None:
+        return list(SCRAPERS)
+    if any(a in ("-h", "--help") for a in argv):
+        print("Uso: python scraper.py [sitio1 sitio2 …]")
+        sys.exit(0)
+    sel = [a for a in argv if a in SCRAPERS]
+    return sel or list(SCRAPERS)
+
+# ────────────────── 8. Google Sheets helpers ───────────────────────────
+def _open_sheet():
+    import gspread
+    from gspread_dataframe import get_as_dataframe, set_with_dataframe
+    from google.oauth2.service_account import Credentials
+
+    scopes = ["https://www.googleapis.com/auth/drive",
+              "https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(CREDS_JSON, scopes=scopes)
+    sh = gspread.authorize(creds).open_by_url(SPREADSHEET_URL)
+    try:
+        ws = sh.worksheet(WORKSHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="10000", cols="40")
+    df = get_as_dataframe(ws, dtype=str, evaluate_formulas=False).dropna(how="all")
+    return ws, df
+
+def _write_sheet(ws, df: pd.DataFrame) -> None:
+    from gspread_dataframe import set_with_dataframe
+    ws.clear()
+    set_with_dataframe(ws, df, include_index=False)
+
+# ────────────────── 9. Orquestador ───────────────────────────────────────
+def main(argv: List[str] | None = None) -> int:
+    try:
+        objetivos = _parse_args(argv if argv is not None else sys.argv[1:])
+        registros: List[Dict] = []
+
+        for k in objetivos:
+            scraper = SCRAPERS[k]()
+            filas = scraper.scrape()
+            scraper.save_csv(filas)
+            registros.extend(filas)
+            print(f"• {k:<11}: {len(filas):>5} filas")
+
+        if not registros:
+            print("Sin datos nuevos.")
+            return 0
+
+        csv_files = glob.glob(PATTERN_DAILY)
+        if not csv_files:
+            print("⚠️  No se encontraron CSV para concatenar.")
+            return 0
+
+        df_all = pd.concat(
+            [pd.read_csv(f, dtype=str) for f in csv_files],
+            ignore_index=True, sort=False
+        )
+        df_all["Precio"] = pd.to_numeric(df_all["Precio"], errors="coerce")
+        df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
+
+        ws, df_prev = _open_sheet()
+        base = pd.concat([df_prev, df_all], ignore_index=True, sort=False)
+        base.sort_values("FechaConsulta", inplace=True)
+        base["FechaConsulta"] = base["FechaConsulta"].dt.strftime("%Y-%m-%d")
+        base.drop_duplicates(KEY_COLS, keep="first", inplace=True)
+
+        if "ID" in base.columns:
+            base.drop(columns=["ID"], inplace=True)
+        base.insert(0, "ID", range(1, len(base) + 1))
+
+        _write_sheet(ws, base)
+        print(f"✅ Hoja actualizada: {len(base)} filas totales")
+        return 0
+
+    except Exception as e:
+        print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
+        return 1
+
+if __name__ == "__main__":
+    sys.exit(main())
+
 
 # ────────────────── 7. Scrapers por sitio ─────────────────────────────────
 class StockScraper(HtmlSiteScraper):
