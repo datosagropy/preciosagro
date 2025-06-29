@@ -86,14 +86,53 @@ def classify(name: str) -> tuple[str | None, str | None]:
     return grp, sub
 
 # ────────────────── 3. Extracción de unidad ─────────────────────────────
-_unit_re = re.compile(
-    r"(?P<valor>\d+(?:[.,]\d+)?)\s*(?P<unidad>kg|g|gr|ml|l|lt|unid(?:ad)?s?|u|paq|stk)\b",
-    re.IGNORECASE
-)
-
 def extract_unit(name: str) -> str:
+    # Expresión regular mejorada para capturar más variaciones
+    _unit_re = re.compile(
+        r"(?P<valor>\d+(?:[.,]\d+)?|[xX])?\s*(?P<unidad>kg|kilos?|g|gr|ml|cc|cm3|l(?:itro)?s?|lt|unid(?:ad)?s?|u|paq|stk)\b",
+        re.IGNORECASE
+    )
+    
     m = _unit_re.search(name)
-    return f"{m.group('valor').replace(',', '.')}{m.group('unidad').upper().replace('LT','L')}" if m else ""
+    if not m:
+        return ""
+    
+    # Obtener componentes
+    valor_str = m.group('valor')
+    unidad_str = m.group('unidad')
+    
+    # Normalizar unidad (mayúsculas, sin puntos, sin plurales)
+    unidad_clean = unidad_str.upper().replace('.', '')
+    if unidad_clean.endswith('S'):
+        unidad_clean = unidad_clean[:-1]  # Eliminar plural
+    
+    # Manejar valores (1 si es None o 'X')
+    if valor_str is None or valor_str.upper() == 'X':
+        valor_num = 1.0
+    else:
+        valor_num = float(valor_str.replace(',', '.'))
+    
+    # Conversión de unidades
+    if unidad_clean in {'KG', 'KILO'}:
+        valor_num *= 1000
+        unidad_out = 'GR'
+    elif unidad_clean in {'L', 'LT', 'LITRO'}:
+        valor_num *= 1000
+        unidad_out = 'CC'
+    elif unidad_clean == 'G' or unidad_clean == 'GR':
+        unidad_out = 'GR'
+    elif unidad_clean == 'ML' or unidad_clean == 'CC' or unidad_clean == 'CM3':
+        unidad_out = 'CC'
+    else:  # Otras unidades (unid, paq, etc.)
+        unidad_out = unidad_clean
+    
+    # Formatear valor (eliminar decimales innecesarios)
+    if valor_num.is_integer():
+        valor_out = str(int(valor_num))
+    else:
+        valor_out = f"{valor_num:.2f}".rstrip('0').rstrip('.')
+    
+    return f"{valor_out}{unidad_out}"
 
 # ────────────────── 4. Normalización de precio ───────────────────────────
 def norm_price(val) -> float:
@@ -355,10 +394,11 @@ def main(argv: List[str] = None) -> int:
             df_combined["Precio"], 
             errors="coerce"
         )
+        
         df_combined["FechaConsulta"] = pd.to_datetime(
-            df_combined["FechaConsulta"], 
+            df_combined["FechaConsulta"],
             errors="coerce"
-        ).dt.strftime("%Y-%m-%d")
+        ).dt.strftime("%Y-%m-%d %H:%M:%S %Z")  # Agrega zona horaria (ej: UTC)
         
         # Integrar con Google Sheets
         print("📊 Integrando con Google Sheets...")
