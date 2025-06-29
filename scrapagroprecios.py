@@ -35,7 +35,7 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
 
 CREDS_JSON = os.environ.get(
     "CREDS_JSON_PATH",
-    os.path.join(BASE_DIR, "creds.json")
+    os.path.abspath("creds.json")  # Usar siempre ruta absoluta
 )
 SPREADSHEET_URL = os.environ.get(
     "SPREADSHEET_URL",
@@ -240,7 +240,10 @@ class AreteScraper(HtmlSiteScraper):
 
 # Jardines (hereda de Arete)
 class JardinesScraper(AreteScraper):
-    def __init__(self): super().__init__(); self.name="losjardines"; self.base_url="https://losjardinesonline.com.py"
+    def __init__(self): 
+        super().__init__()
+        self.name = "losjardines"
+        self.base_url = "https://losjardinesonline.com.py"
 
 # Biggie (API)
 class BiggieScraper:
@@ -283,65 +286,103 @@ SCRAPERS: Dict[str, Callable[[], object]] = {
 # ────────────────── 8. Orquestador y Google Sheets ──────────────────────
 def _open_sheet():
     import gspread
-    from gspread_dataframe import get_as_dataframe,set_with_dataframe
+    from gspread_dataframe import get_as_dataframe, set_with_dataframe
     from google.oauth2.service_account import Credentials
-    scopes=["https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/spreadsheets"]
-    creds=Credentials.from_service_account_file(CREDS_JSON,scopes=scopes)
-    sh=gspread.authorize(creds).open_by_url(SPREADSHEET_URL)
-    try: ws=sh.worksheet(WORKSHEET_NAME)
-    except: ws=sh.add_worksheet(title=WORKSHEET_NAME,rows="10000",cols="40")
-    df=get_as_dataframe(ws,dtype=str,evaluate_formulas=False).dropna(how="all")
-    return ws,df
+    
+    scopes = [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets"
+    ]
+    creds = Credentials.from_service_account_file(CREDS_JSON, scopes=scopes)
+    sh = gspread.authorize(creds).open_by_url(SPREADSHEET_URL)
+    
+    try:
+        ws = sh.worksheet(WORKSHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="10000", cols="40")
+    
+    try:
+        df = get_as_dataframe(ws, dtype=str, evaluate_formulas=False).dropna(how="all")
+        if df.empty:
+            df = pd.DataFrame(columns=KEY_COLS + ["Precio", "Unidad", "Grupo", "Subgrupo"])
+    except Exception as e:
+        print(f"⚠️ Error leyendo hoja: {e}. Usando DataFrame vacío")
+        df = pd.DataFrame(columns=KEY_COLS + ["Precio", "Unidad", "Grupo", "Subgrupo"])
+    
+    return ws, df
 
-def _write_sheet(ws,df:pd.DataFrame)->None:
+def _write_sheet(ws, df: pd.DataFrame) -> None:
     from gspread_dataframe import set_with_dataframe
-    ws.clear(); set_with_dataframe(ws,df,include_index=False)
+    set_with_dataframe(ws, df, include_index=False)
+
+def _parse_args(args: List[str]) -> List[str]:
+    """Parse CLI arguments for scraper selection"""
+    if not args:
+        return list(SCRAPERS.keys())  # Todos los scrapers
+    valid = [k for k in args if k in SCRAPERS]
+    return valid if valid else list(SCRAPERS.keys())
 
 def main(argv: List[str] = None) -> int:
     try:
         args = _parse_args(argv if argv is not None else sys.argv[1:])
         all_records: List[Dict] = []
         for key in args:
+            print(f"🚀 Iniciando scraper: {key}")
             scraper = SCRAPERS[key]()
             rows = scraper.scrape()
             scraper.save_csv(rows)
             all_records.extend(rows)
+            print(f"✅ {key}: {len(rows)} productos")
+        
         if not all_records:
-            print("Sin datos nuevos.")
+            print("⚠️ Sin datos nuevos. Saliendo.")
             return 0
 
+        # Combinar archivos diarios
         files = glob.glob(PATTERN_DAILY)
         if not files:
-            print("⚠️ No se encontraron CSV para concatenar.")
+            print("⚠️ No se encontraron CSV para concatenar")
             return 0
-
+            
         df_combined = pd.concat(
             [pd.read_csv(f, dtype=str) for f in files],
             ignore_index=True,
             sort=False
         )
-        df_combined["Precio"] = pd.to_numeric(df_combined["Precio"], errors="coerce")
-        df_combined["FechaConsulta"] = pd.to_datetime(
-            df_combined["FechaConsulta"], errors="coerce"
+        df_combined["Precio"] = pd.to_numeric(
+            df_combined["Precio"], 
+            errors="coerce"
         )
-
+        df_combined["FechaConsulta"] = pd.to_datetime(
+            df_combined["FechaConsulta"], 
+            errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+        
+        # Integrar con Google Sheets
+        print("📊 Integrando con Google Sheets...")
         ws, prev_df = _open_sheet()
-        merged = pd.concat([prev_df, df_combined], ignore_index=True, sort=False)
-        merged.sort_values("FechaConsulta", inplace=True)
-        merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d")
-        merged.drop_duplicates(KEY_COLS, keep="first", inplace=True)
-
-        if "ID" in merged.columns:
-            merged.drop(columns=["ID"], inplace=True)
-        merged.insert(0, "ID", range(1, len(merged) + 1))
-
+        
+        # Si no existe ID, crear columna
+        if "ID" not in prev_df.columns:
+            prev_df["ID"] = ""
+        
+        merged = pd.concat([prev_df, df_combined], ignore_index=True)
+        merged.drop_duplicates(
+            subset=KEY_COLS, 
+            keep="last", 
+            inplace=True
+        )
+        
+        # Generar IDs únicos
+        merged["ID"] = range(1, len(merged) + 1)
+        
         _write_sheet(ws, merged)
-        print(f"✅ Hoja actualizada: {len(merged)} filas totales")
+        print(f"✅ Hoja actualizada: {len(merged)} registros")
         return 0
     
     except Exception as e:
-        print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
+        print(f"❌ Error crítico: {e}", file=sys.stderr)
         return 1
-        
+
 if __name__ == "__main__":
-            sys.exit(main())
+    sys.exit(main())
