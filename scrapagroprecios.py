@@ -253,10 +253,8 @@ def main(argv: List[str] | None = None) -> int:
             print("⚠️  No se encontraron CSV para concatenar.")
             return 0
 
-        df_all = pd.concat(
-            [pd.read_csv(f, dtype=str) for f in csv_files],
-            ignore_index=True, sort=False
-        )
+        df_all = pd.concat([pd.read_csv(f, dtype=str) for f in csv_files],
+                           ignore_index=True, sort=False)
         df_all["Precio"] = pd.to_numeric(df_all["Precio"], errors="coerce")
         df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
 
@@ -278,8 +276,10 @@ def main(argv: List[str] | None = None) -> int:
         print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
         return 1
 
+
 if __name__ == "__main__":
     sys.exit(main())
+
 
 
 # ────────────────── 7. Scrapers por sitio ─────────────────────────────────
