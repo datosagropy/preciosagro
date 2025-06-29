@@ -2,9 +2,9 @@ name: 🥕 Run Precios-Scraper
 
 on:
   schedule:
-    # A las 20:00 PY (UTC–4) → 00:00 UTC
+    # 20:00 PY (UTC–4) → 00:00 UTC
     - cron: '0 0 * * *'
-    # A las 08:00 PY (UTC–4) → 12:00 UTC
+    # 08:00 PY (UTC–4) → 12:00 UTC
     - cron: '0 12 * * *'
   workflow_dispatch:
 
@@ -40,7 +40,7 @@ jobs:
 
       - name: Ejecutar scraper
         run: |
-          python tools/scraper/scraper.py
+          python scrapagroprecios.py
 
       - name: Publicar CSVs como artefacto
         if: always()
