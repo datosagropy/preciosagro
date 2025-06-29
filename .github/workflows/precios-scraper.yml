@@ -32,4 +32,33 @@ jobs:
           pip uninstall -y numpy pandas
           pip install --no-cache-dir cython
           pip install --no-cache-dir numpy==1.26.4
-          pip install --no-cache
+          pip install --no-cache-dir pandas==2.2.2
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Configurar credenciales Google
+        env:
+          GCP_CREDS: ${{ secrets.GCP_CREDENTIALS_JSON }}
+        run: |
+          echo "$GCP_CREDS" > creds.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/creds.json" >> $GITHUB_ENV
+
+      - name: Crear directorio de salida
+        run: mkdir -p ${{ env.OUT_DIR }}
+
+      - name: Ejecutar scraper
+        run: python scrapagroprecios.py
+
+      - name: Verificar archivos generados
+        run: |
+          echo "Contenido del directorio out:"
+          ls -la ${{ env.OUT_DIR }}
+          echo "Total de archivos CSV:"
+          find ${{ env.OUT_DIR }} -name "*.csv" | wc -l
+
+      - name: Publicar CSVs como artefacto
+        if: ${{ always() && success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: precios-artefacto
+          path: ${{ env.OUT_DIR }}/*.csv
+          if-no-files-found: ignore
