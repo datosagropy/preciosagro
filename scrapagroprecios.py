@@ -324,8 +324,10 @@ def _parse_args(args: List[str]) -> List[str]:
 
 def main(argv: List[str] = None) -> int:
     try:
+        # La siguiente línea debe estar indentada dentro del bloque try
         args = _parse_args(argv if argv is not None else sys.argv[1:])
         all_records: List[Dict] = []
+        
         for key in args:
             print(f"🚀 Iniciando scraper: {key}")
             scraper = SCRAPERS[key]()
@@ -334,6 +336,7 @@ def main(argv: List[str] = None) -> int:
             all_records.extend(rows)
             print(f"✅ {key}: {len(rows)} productos")
         
+        # El resto del código debe estar indentado dentro del bloque try
         if not all_records:
             print("⚠️ Sin datos nuevos. Saliendo.")
             return 0
@@ -380,7 +383,7 @@ def main(argv: List[str] = None) -> int:
         print(f"✅ Hoja actualizada: {len(merged)} registros")
         return 0
     
-    except Exception as e:
+    except Exception as e:  # Este except debe estar al mismo nivel que el try
         print(f"❌ Error crítico: {e}", file=sys.stderr)
         return 1
 
