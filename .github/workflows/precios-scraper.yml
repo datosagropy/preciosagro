@@ -1,7 +1,11 @@
 name: 🥕 Run Precios-Scraper
+
 on:
   schedule:
-    - cron:  '0 2 * * *'
+    # A las 20:00 PY (UTC–4) → 00:00 UTC
+    - cron: '0 0 * * *'
+    # A las 08:00 PY (UTC–4) → 12:00 UTC
+    - cron: '0 12 * * *'
   workflow_dispatch:
 
 jobs:
@@ -11,6 +15,7 @@ jobs:
       BASE_DIR: ${{ github.workspace }}
       OUT_DIR:  ${{ github.workspace }}/out
       FILE_TAG: frutihort
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v3
@@ -35,7 +40,7 @@ jobs:
 
       - name: Ejecutar scraper
         run: |
-          python tools/scraper/scraper.py     # ← ajusta la ruta
+          python tools/scraper/scraper.py
 
       - name: Publicar CSVs como artefacto
         if: always()
@@ -43,3 +48,4 @@ jobs:
         with:
           name: precios-artefacto
           path: out/*.csv
+
