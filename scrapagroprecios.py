@@ -338,10 +338,9 @@ def main(argv: List[str] = None) -> int:
         _write_sheet(ws, merged)
         print(f"✅ Hoja actualizada: {len(merged)} filas totales")
         return 0
-
+    
     except Exception as e:
         print(f"⚠️ Error inesperado en scraper: {e}", file=sys.stderr)
         return 1
-        
         if __name__ == "__main__":
             sys.exit(main())
