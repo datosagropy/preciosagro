@@ -2,9 +2,7 @@ name: 🥕 Run Precios-Scraper
 
 on:
   schedule:
-    # 20:00 PY (UTC–4) → 00:00 UTC
     - cron: '0 0 * * *'
-    # 08:00 PY (UTC–4) → 12:00 UTC
     - cron: '0 12 * * *'
   workflow_dispatch:
 
@@ -14,7 +12,6 @@ jobs:
     env:
       BASE_DIR: ${{ github.workspace }}
       OUT_DIR: ${{ github.workspace }}/out
-      # Variables requeridas por el script
       GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
       SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
       WORKSHEET_NAME: "precios_supermercados"
@@ -44,9 +41,17 @@ jobs:
         run: mkdir -p ${{ env.OUT_DIR }}
 
       - name: Ejecutar scraper
-        run: python scraper.py
+        run: python scrapagroprecios.py
+
+      - name: Verificar archivos generados
+        run: |
+          echo "Contenido del directorio out:"
+          ls -la ${{ env.OUT_DIR }}
+          echo "Total de archivos CSV:"
+          find ${{ env.OUT_DIR }} -name "*.csv" | wc -l
 
       - name: Publicar CSVs como artefacto
+        if: ${{ always() && success() }}
         uses: actions/upload-artifact@v4
         with:
           name: precios-artefacto
