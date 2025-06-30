@@ -284,7 +284,7 @@ class BiggieScraper:
             if skip>=js.get('count',0): break
         return out
     def scrape(self)->List[Dict]:
-        ts=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         rows=[]
         for grp in self.GROUPS:
             for r in self.parse_category(grp): r['FechaConsulta']=ts; rows.append(r)
