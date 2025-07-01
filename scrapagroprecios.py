@@ -80,6 +80,20 @@ def classify(name: str) -> (str,str):
     sub = next((s for s,ks in SUB_TOKENS.items() if toks & ks), "")
     return grp, sub
 
+# ---------- 2.5. Filtro de exclusión opcional ----------
+EXCLUDE_PATTERNS = [
+    r"\bcombo\b",            # evita combos/promos
+    r"\bpack\b",             # evita packs (precios por varias unidades)
+    r"\bdisney\b",           # ejemplo de marca que no queremos
+]
+_ex_re = re.compile("|".join(EXCLUDE_PATTERNS), re.I)
+
+def is_excluded(name: str) -> bool:
+    """Devuelve True si el nombre del producto coincide con alguno de los
+    patrones en EXCLUDE_PATTERNS.  Modifica la lista anterior según necesidad."""
+    return bool(_ex_re.search(name))
+
+
 # ─────────────── 3. Extracción de unidad ─────────────────────────────
 _unit_re = re.compile(
     r"(?P<val>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilos?|g|gr|ml|cc|l(?:itro)?s?|lt|unid(?:ad)?s?|u|paq|stk)\b",
@@ -121,27 +135,53 @@ def norm_price(val) -> float:
 from bs4.element import Tag
 
 def _first_price(node: Tag) -> float:
-    for attr in ("data-price","data-price-final","data-price-amount"):
-        if node.has_attr(attr) and norm_price(node[attr])>0:
-            return norm_price(node[attr])
+    """Devuelve el primer precio numérico encontrado en *node*.
+    Incluye el caso especial de Superseis: <span class="price-gs">Gs </span>49.000"""
+    # 1️⃣  Superseis – precio es texto hermano de <span class="price-gs">Gs </span>
+    price_gs = node.select_one("span.price-gs")
+    if price_gs and price_gs.next_sibling:
+        p = norm_price(price_gs.next_sibling)
+        if p > 0:
+            return p
+
+    # 2️⃣  Atributos data-*
+    for attr in ("data-price", "data-price-final", "data-price-amount"):
+        if node.has_attr(attr):
+            p = norm_price(node[attr])
+            if p > 0:
+                return p
+
+    # 3️⃣  <meta itemprop="price" content="..."><meta>
     meta = node.select_one("meta[itemprop='price']")
-    if meta and norm_price(meta.get('content',''))>0:
-        return norm_price(meta.get('content',''))
+    if meta:
+        p = norm_price(meta.get("content", ""))
+        if p > 0:
+            return p
+
+    # 4️⃣  Selectores genéricos
     for sel in _price_selectors:
         el = node.select_one(sel)
         if el:
-            p = norm_price(el.get_text() or el.get(sel,''))
-            if p>0: return p
+            p = norm_price(el.get_text() or el.get(sel, ""))
+            if p > 0:
+                return p
+
     return 0.0
 
-# ─────────────── 5. HTTP session robusta ───────────────────────────────
+# ────────────────── 5. Sesión HTTP robusta ─────────────────────────────
 def _build_session() -> requests.Session:
-    retry = Retry(total=3,backoff_factor=1.2,status_forcelist=(429,500,502,503,504),allowed_methods=("GET","HEAD"))
-    s = requests.Session()
-    s.headers['User-Agent']='Mozilla/5.0'
+    retry = Retry(
+        total=3,
+        backoff_factor=1.2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET", "HEAD")
+    )
     adapter = HTTPAdapter(max_retries=retry)
-    s.mount('http://',adapter); s.mount('https://',adapter)
-    return s
+    session = requests.Session()
+    session.headers["User-Agent"] = "Mozilla/5.0"
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 
 # ─────────────── 6. Clase base scraper ───────────────────────────────
 class HtmlSiteScraper:
