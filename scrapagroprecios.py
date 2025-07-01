@@ -12,7 +12,7 @@ Este script:
 Columns: ['ID','Supermercado','Producto','Precio','Unidad','Grupo','Subgrupo','FechaConsulta']
 """
 import os, sys, glob, re, json, unicodedata, tempfile
-from datetime import datetime, timezone
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Set
 from urllib.parse import urljoin
@@ -135,53 +135,27 @@ def norm_price(val) -> float:
 from bs4.element import Tag
 
 def _first_price(node: Tag) -> float:
-    """Devuelve el primer precio numérico encontrado en *node*.
-    Incluye el caso especial de Superseis: <span class="price-gs">Gs </span>49.000"""
-    # 1️⃣  Superseis – precio es texto hermano de <span class="price-gs">Gs </span>
-    price_gs = node.select_one("span.price-gs")
-    if price_gs and price_gs.next_sibling:
-        p = norm_price(price_gs.next_sibling)
-        if p > 0:
-            return p
-
-    # 2️⃣  Atributos data-*
-    for attr in ("data-price", "data-price-final", "data-price-amount"):
-        if node.has_attr(attr):
-            p = norm_price(node[attr])
-            if p > 0:
-                return p
-
-    # 3️⃣  <meta itemprop="price" content="..."><meta>
+    for attr in ("data-price","data-price-final","data-price-amount"):
+        if node.has_attr(attr) and norm_price(node[attr])>0:
+            return norm_price(node[attr])
     meta = node.select_one("meta[itemprop='price']")
-    if meta:
-        p = norm_price(meta.get("content", ""))
-        if p > 0:
-            return p
-
-    # 4️⃣  Selectores genéricos
+    if meta and norm_price(meta.get('content',''))>0:
+        return norm_price(meta.get('content',''))
     for sel in _price_selectors:
         el = node.select_one(sel)
         if el:
-            p = norm_price(el.get_text() or el.get(sel, ""))
-            if p > 0:
-                return p
-
+            p = norm_price(el.get_text() or el.get(sel,''))
+            if p>0: return p
     return 0.0
 
-# ────────────────── 5. Sesión HTTP robusta ─────────────────────────────
+# ─────────────── 5. HTTP session robusta ───────────────────────────────
 def _build_session() -> requests.Session:
-    retry = Retry(
-        total=3,
-        backoff_factor=1.2,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=("GET", "HEAD")
-    )
+    retry = Retry(total=3,backoff_factor=1.2,status_forcelist=(429,500,502,503,504),allowed_methods=("GET","HEAD"))
+    s = requests.Session()
+    s.headers['User-Agent']='Mozilla/5.0'
     adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.headers["User-Agent"] = "Mozilla/5.0"
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
+    s.mount('http://',adapter); s.mount('https://',adapter)
+    return s
 
 # ─────────────── 6. Clase base scraper ───────────────────────────────
 class HtmlSiteScraper:
@@ -335,7 +309,7 @@ class BiggieScraper:
         pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR,fn),index=False)
 
 # ─────────────── 12. Registro de scrapers ─────────────────────────
-SCRAPERS: Dict[str,callable] = {
+SCRAPERS: Dict[str,Callable] = {
     'stock': StockScraper,
     'superseis': SuperseisScraper,
     'salemma': SalemmaScraper,
@@ -376,11 +350,16 @@ def main():
     df_all=pd.concat([pd.read_csv(f,dtype=str)[COLUMNS] for f in files],ignore_index=True)
     df_all['Precio']=pd.to_numeric(df_all['Precio'],errors='coerce').fillna(0.0)
     df_all['FechaConsulta']=pd.to_datetime(df_all['FechaConsulta'],errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
-    ws,df_prev=_open_sheet()
+    ws, prev_df = _open_sheet()
     merged = pd.concat([prev_df, df_all], ignore_index=True, sort=False)
     merged.sort_values("FechaConsulta", inplace=True)
-    # aquí incluimos hora en el formato
     merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    merged.drop_duplicates(KEY_COLS, keep="first", inplace=True)
+
+_write_sheet(ws, merged)
+
+    ws,df_prev=_open_sheet()
+    merged=pd.concat([df_prev,df_all],ignore_index=True)
     merged.drop_duplicates(subset=KEY_COLS,keep='first',inplace=True)
     if 'ID' in merged.columns: merged.drop(columns=['ID'],inplace=True)
     merged.insert(0,'ID',range(1,len(merged)+1))
