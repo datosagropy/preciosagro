@@ -12,7 +12,7 @@ Este script:
 Columns: ['ID','Supermercado','Producto','Precio','Unidad','Grupo','Subgrupo','FechaConsulta']
 """
 import os, sys, glob, re, json, unicodedata, tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Set
 from urllib.parse import urljoin
