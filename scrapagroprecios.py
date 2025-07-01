@@ -337,7 +337,10 @@ def main():
     df_all['Precio']=pd.to_numeric(df_all['Precio'],errors='coerce').fillna(0.0)
     df_all['FechaConsulta']=pd.to_datetime(df_all['FechaConsulta'],errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
     ws,df_prev=_open_sheet()
-    merged=pd.concat([df_prev,df_all],ignore_index=True)
+    merged = pd.concat([prev_df, df_all], ignore_index=True, sort=False)
+    merged.sort_values("FechaConsulta", inplace=True)
+    # aquí incluimos hora en el formato
+    merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
     merged.drop_duplicates(subset=KEY_COLS,keep='first',inplace=True)
     if 'ID' in merged.columns: merged.drop(columns=['ID'],inplace=True)
     merged.insert(0,'ID',range(1,len(merged)+1))
