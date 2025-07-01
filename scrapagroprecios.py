@@ -357,14 +357,13 @@ def main():
     merged.drop_duplicates(KEY_COLS, keep="first", inplace=True)
 
 _write_sheet(ws, merged)
-
-    ws,df_prev=_open_sheet()
-    merged=pd.concat([df_prev,df_all],ignore_index=True)
-    merged.drop_duplicates(subset=KEY_COLS,keep='first',inplace=True)
-    if 'ID' in merged.columns: merged.drop(columns=['ID'],inplace=True)
+ws,df_prev=_open_sheet()
+merged=pd.concat([df_prev,df_all],ignore_index=True)
+merged.drop_duplicates(subset=KEY_COLS,keep='first',inplace=True)
+if 'ID' in merged.columns: merged.drop(columns=['ID'],inplace=True)
     merged.insert(0,'ID',range(1,len(merged)+1))
-    _write_sheet(ws,merged)
-    print(f'Hoja actualizada: {len(merged)} registros')
+_write_sheet(ws,merged)
+print(f'Hoja actualizada: {len(merged)} registros')
 
 if __name__=='__main__':
     main()
