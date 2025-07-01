@@ -309,7 +309,7 @@ class BiggieScraper:
         pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR,fn),index=False)
 
 # ─────────────── 12. Registro de scrapers ─────────────────────────
-SCRAPERS: Dict[str,Callable] = {
+SCRAPERS: Dict[str,callable] = {
     'stock': StockScraper,
     'superseis': SuperseisScraper,
     'salemma': SalemmaScraper,
