@@ -30,7 +30,7 @@ from google.oauth2.service_account import Credentials
 BASE_DIR       = os.environ.get("BASE_DIR", os.getcwd())
 OUT_DIR        = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))
 FILE_TAG       = "frutihort"
-PATTERN_DAILY  = os.path.join(OUT_DIR, f"*canasta_{FILE_TAG}_*.csv")
+PATTERN_DAILY = os.path.join(OUT_DIR, "*.csv")  # ← o elimínalo si vas por la Opción B
 SPREADSHEET_URL= os.environ.get("SPREADSHEET_URL")
 CREDS_JSON     = os.environ.get("CREDS_JSON_PATH", os.path.abspath("creds.json"))
 WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "precios_supermercados")
@@ -348,6 +348,16 @@ def main() -> None:
     if not all_rows:
         print("Sin datos nuevos.")
         return
+
+        # 2)  HISTÓRICO + FILAS NUEVAS ------------------------------
+    files = glob.glob(PATTERN_DAILY)            # ← Opción A
+    if files:
+        df_all = pd.concat(
+            [pd.read_csv(f, dtype=str)[COLUMNS] for f in files],
+            ignore_index=True
+        )
+    else:                                       # primera corrida
+        df_all = pd.DataFrame(all_rows, columns=COLUMNS)
 
     # 2) leer todos los CSV acumulados (patrón diario)
     files   = glob.glob(PATTERN_DAILY)
