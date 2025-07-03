@@ -498,51 +498,49 @@ def _write_sheet(ws, df: pd.DataFrame):
     set_with_dataframe(ws, df[['ID'] + COLUMNS], include_index=False)
 
 def main() -> None:
-    # 1) Scrapear y guardar CSVs individuales
-    all_rows = []
-    for key, cls in SCRAPERS.items():
-        inst = cls()
-        rows = inst.scrape()
-        inst.save_csv(rows)
-        all_rows.extend(rows)
-
+    # 1) Scrapear y guardar CSVs...
+    all_rows = [...]
     if not all_rows:
         print("Sin datos nuevos.")
         return
 
-    # 2) Leer histórico + actuales
-    files = glob.glob(PATTERN_DAILY)
-    if files:
-        df_all = pd.concat(
-            [pd.read_csv(f, dtype=str)[COLUMNS] for f in files],
-            ignore_index=True
-        )
-    else:
-        df_all = pd.DataFrame(all_rows, columns=COLUMNS)
+    # 2) Abrir Sheets y leer lo que ya hay
+    ws, prev_df = _open_sheet()
+    prev_df["FechaConsulta"] = pd.to_datetime(prev_df["FechaConsulta"], errors="coerce")
 
-    df_all["Precio"] = pd.to_numeric(df_all["Precio"], errors="coerce").fillna(0.0)
+    # 3) Construir df_all (tus filas actuales)
+    df_all = pd.DataFrame(all_rows, columns=COLUMNS)
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
 
-    # 3) Abrir hoja en Google Sheets
-    ws, prev_df = _open_sheet()
-    if not prev_df.empty:
-        prev_df["Precio"] = pd.to_numeric(prev_df["Precio"], errors="coerce").fillna(0.0)
-        prev_df["FechaConsulta"] = pd.to_datetime(prev_df["FechaConsulta"], errors="coerce")
+    # 4) Identificar SOLO las filas que NO estén en prev_df
+    merged = pd.merge(
+        df_all,
+        prev_df[KEY_COLS],
+        on=KEY_COLS,
+        how="left",
+        indicator=True
+    )
+    new_rows = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
 
-    # 4) Fusionar, deduplicar, ordenar
-    merged = pd.concat([prev_df, df_all], ignore_index=True, sort=False)
-    merged.drop_duplicates(KEY_COLS, keep="first", inplace=True)
-    merged.sort_values("FechaConsulta", inplace=True)
+    if new_rows.empty:
+        print("No hay filas nuevas para añadir.")
+        return
 
-    # 5) Generar ID y formatear FechaConsulta
-    if "ID" in merged.columns:
-        merged.drop(columns=["ID"], inplace=True)
-    merged.insert(0, "ID", range(1, len(merged) + 1))
-    merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    # 5) Formatear FechaConsulta de las filas nuevas
+    new_rows["FechaConsulta"] = new_rows["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 6) Subir a Google Sheets
-    _write_sheet(ws, merged)
-    print(f"Hoja actualizada: {len(merged)} registros")
+    # 6) Append: escribe SOLO las nuevas debajo de lo existente
+    #    calcula la fila de inicio (toma en cuenta cabecera)
+    start_row = len(prev_df) + 2
+    set_with_dataframe(
+        ws,
+        new_rows[['ID'] + COLUMNS],       # incluye tu columna ID si la usas
+        row=start_row,
+        include_index=False,
+        include_column_header=False
+    )
+
+    print(f"Añadidas {len(new_rows)} filas nuevas a la hoja.")
 
 if __name__ == "__main__":
     main()
