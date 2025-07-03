@@ -498,49 +498,64 @@ def _write_sheet(ws, df: pd.DataFrame):
     set_with_dataframe(ws, df[['ID'] + COLUMNS], include_index=False)
 
 def main() -> None:
-    # 1) Scrapear y guardar CSVs...
-    all_rows = [...]
+    # 1) Ejecutar todos los scrapers y coleccionar filas nuevas
+    all_rows = []
+    for cls in SCRAPERS.values():
+        inst = cls()
+        rows = inst.scrape()
+        inst.save_csv(rows)
+        all_rows.extend(rows)
+
     if not all_rows:
         print("Sin datos nuevos.")
         return
 
-    # 2) Abrir Sheets y leer lo que ya hay
-    ws, prev_df = _open_sheet()
-    prev_df["FechaConsulta"] = pd.to_datetime(prev_df["FechaConsulta"], errors="coerce")
-
-    # 3) Construir df_all (tus filas actuales)
-    df_all = pd.DataFrame(all_rows, columns=COLUMNS)
-    df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
-
-    # 4) Identificar SOLO las filas que NO estén en prev_df
-    merged = pd.merge(
-        df_all,
-        prev_df[KEY_COLS],
-        on=KEY_COLS,
-        how="left",
-        indicator=True
+    # 2) Convertir a DataFrame y formatear FechaConsulta
+    df_all = pd.DataFrame(all_rows)
+    df_all = df_all[COLUMNS].copy()
+    df_all["FechaConsulta"] = pd.to_datetime(
+        df_all["FechaConsulta"], errors="coerce"
     )
-    new_rows = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
 
-    if new_rows.empty:
+    # 3) Leer lo que ya está en la hoja
+    ws, prev_df = _open_sheet()
+    # Asegúrate de que prev_df tenga las mismas columnas y tipo datetime
+    prev_df = prev_df[COLUMNS].copy()
+    prev_df["FechaConsulta"] = pd.to_datetime(
+        prev_df["FechaConsulta"], errors="coerce"
+    )
+
+    # 4) Detectar SOLO las filas que NO existen aún
+    #    Creamos índices basados en las KEY_COLS para comparar
+    idx_prev = prev_df.set_index(KEY_COLS).index
+    idx_all  = df_all.set_index(KEY_COLS).index
+    new_idx  = idx_all.difference(idx_prev)
+
+    if new_idx.empty:
         print("No hay filas nuevas para añadir.")
         return
 
-    # 5) Formatear FechaConsulta de las filas nuevas
+    # 5) Extraer y preparar esas filas nuevas
+    new_rows = df_all.set_index(KEY_COLS).loc[new_idx].reset_index()
+    # Asignar IDs consecutivos: si ya hay N previos, empezamos en N+1
+    start_id = len(prev_df) + 1
+    new_rows.insert(0, "ID", range(start_id, start_id + len(new_rows)))
+    # Volver FechaConsulta a string
     new_rows["FechaConsulta"] = new_rows["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 6) Append: escribe SOLO las nuevas debajo de lo existente
-    #    calcula la fila de inicio (toma en cuenta cabecera)
-    start_row = len(prev_df) + 2
+    # 6) Hacer append en lugar de clear+write
+    #    La primera fila de datos (después del header) es la fila 2, así que
+    #    row = len(prev_df) + 2
     set_with_dataframe(
         ws,
-        new_rows[['ID'] + COLUMNS],       # incluye tu columna ID si la usas
-        row=start_row,
+        new_rows[["ID"] + COLUMNS],
+        row=len(prev_df) + 2,
         include_index=False,
         include_column_header=False
     )
 
     print(f"Añadidas {len(new_rows)} filas nuevas a la hoja.")
+
 
 if __name__ == "__main__":
     main()
