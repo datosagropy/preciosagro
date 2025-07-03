@@ -12,7 +12,7 @@ Este script:
 Columns: ['ID','Supermercado','Producto','Precio','Unidad','Grupo','Subgrupo','FechaConsulta']
 """
 import os, sys, glob, re, json, unicodedata, tempfile
-from datetime import datetime
+from datetime import datetime, timezone   #  ← añade timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Set
 from urllib.parse import urljoin
@@ -336,34 +336,53 @@ def _write_sheet(ws,df:pd.DataFrame):
     ws.clear()
     set_with_dataframe(ws,df[COLUMNS],include_index=False)
 
-def main():
-    all_rows=[]
-    for key,cls in SCRAPERS.items():
-        inst=cls()
-        rows=inst.scrape()
+def main() -> None:
+    # 1) ejecutar todos los scrapers y guardar CSV día/ejecución
+    all_rows = []
+    for key, cls in SCRAPERS.items():
+        inst = cls()
+        rows = inst.scrape()
         inst.save_csv(rows)
         all_rows.extend(rows)
+
     if not all_rows:
-        print('Sin datos nuevos.')
+        print("Sin datos nuevos.")
         return
-    files=glob.glob(PATTERN_DAILY)
-    df_all=pd.concat([pd.read_csv(f,dtype=str)[COLUMNS] for f in files],ignore_index=True)
-    df_all['Precio']=pd.to_numeric(df_all['Precio'],errors='coerce').fillna(0.0)
-    df_all['FechaConsulta']=pd.to_datetime(df_all['FechaConsulta'],errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    # 2) leer todos los CSV acumulados (patrón diario)
+    files   = glob.glob(PATTERN_DAILY)
+    df_all  = pd.concat(
+        [pd.read_csv(f, dtype=str)[COLUMNS] for f in files],
+        ignore_index=True
+    )
+    df_all["Precio"] = pd.to_numeric(df_all["Precio"], errors="coerce").fillna(0.0)
+    df_all["FechaConsulta"] = pd.to_datetime(
+        df_all["FechaConsulta"], errors="coerce"
+    )
+
+    # 3) abrir hoja Google Sheets y obtener histórico
     ws, prev_df = _open_sheet()
+    if not prev_df.empty:
+        prev_df["Precio"] = pd.to_numeric(prev_df["Precio"], errors="coerce").fillna(0.0)
+        prev_df["FechaConsulta"] = pd.to_datetime(
+            prev_df["FechaConsulta"], errors="coerce"
+        )
+
+    # 4) fusionar + depurar duplicados
     merged = pd.concat([prev_df, df_all], ignore_index=True, sort=False)
-    merged.sort_values("FechaConsulta", inplace=True)
-    merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
     merged.drop_duplicates(KEY_COLS, keep="first", inplace=True)
+    merged.sort_values("FechaConsulta", inplace=True)
 
-_write_sheet(ws, merged)
-ws,df_prev=_open_sheet()
-merged=pd.concat([df_prev,df_all],ignore_index=True)
-merged.drop_duplicates(subset=KEY_COLS,keep='first',inplace=True)
-if 'ID' in merged.columns: merged.drop(columns=['ID'],inplace=True)
-merged.insert(0,'ID',range(1,len(merged)+1))
-_write_sheet(ws,merged)
-print(f'Hoja actualizada: {len(merged)} registros')
+    # 5) formatear campos finales
+    merged["FechaConsulta"] = merged["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    if "ID" in merged.columns:
+        merged.drop(columns=["ID"], inplace=True)
+    merged.insert(0, "ID", range(1, len(merged) + 1))
 
-if __name__=='__main__':
+    # 6) subir a Google Sheets
+    _write_sheet(ws, merged)
+    print(f"Hoja actualizada: {len(merged)} registros")
+
+# ------------------------------------------------------------------
+if __name__ == "__main__":
     main()
