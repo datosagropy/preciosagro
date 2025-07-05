@@ -252,51 +252,62 @@ class StockScraper(HtmlSiteScraper):
             })
         return out
 
-# ─────────────── 8. Superseis ───────────────────────────────
 class SuperseisScraper(HtmlSiteScraper):
     def __init__(self):
-        super().__init__('superseis', 'https://www.superseis.com.py')
+        super().__init__("superseis", "https://www.superseis.com.py")
 
     def category_urls(self) -> List[str]:
-        soup = BeautifulSoup(
-            self.session.get(self.base_url, timeout=REQ_TIMEOUT).text,
-            'html.parser'
-        )
-        kws = [tok for lst in BROAD_GROUP_KEYWORDS.values() for tok in lst]
-        return [
-            urljoin(self.base_url, a['href'])
-            for a in soup.select('a.collapsed[href*="/category/"]')
-            if any(k in a['href'].lower() for k in kws)
-        ]
-
-    def parse_category(self, url: str) -> List[Dict]:
         try:
-            resp = self.session.get(url, timeout=REQ_TIMEOUT)
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"[superseis] WARN {e} -> {url}")
+            r = self.session.get(self.base_url, timeout=REQ_TIMEOUT)
+            r.raise_for_status()
+        except Exception:
             return []
-        soup = BeautifulSoup(resp.content, 'html.parser')
-        out = []
-        for link in soup.select('a.product-title-link'):
-            nm = link.get_text(' ', strip=True)
-            if is_excluded(nm):
+        soup = BeautifulSoup(r.text, "html.parser")
+        return list({
+            urljoin(self.base_url, a["href"])
+            for a in soup.find_all("a", href=True, class_="collapsed")
+            if "/category/" in a["href"]
+        })
+
+    def parse_category(self, url: str) -> List[dict]:
+        regs: List[dict] = []
+        try:
+            r = self.session.get(url, timeout=REQ_TIMEOUT)
+            r.raise_for_status()
+        except Exception:
+            return regs
+
+        soup = BeautifulSoup(r.content, "html.parser")
+        for a in soup.find_all("a", class_="product-title-link"):
+            nombre = a.get_text(strip=True)
+            if is_excluded(nombre):
                 continue
-            parent = link.find_parent('div.product-item') or link
-            price = _first_price(parent)
-            grp, sub = classify(nm)
+
+            # parent contenedor, igual que tu código original
+            cont = a.find_parent("div", class_="product-item")
+            # buscamos explícitamente el span.price-label
+            tag = (cont and cont.find("span", class_="price-label")) \
+                  or a.find_next("span", class_="price-label")
+            precio = norm_price(tag.get_text()) if tag else 0.0
+            if precio <= 0:
+                continue
+
+            grp, sub = classify(nombre)
             if not grp:
                 continue
-            unit = extract_unit(nm)
-            out.append({
-                'Supermercado': 'superseis',
-                'Producto':     nm.upper(),
-                'Precio':       price,
-                'Unidad':       unit,
-                'Grupo':        grp,
-                'Subgrupo':     sub
+
+            unidad = extract_unit(nombre)
+            regs.append({
+                "Supermercado":   self.name,
+                "Producto":       nombre.upper(),
+                "Precio":         precio,
+                "Unidad":         unidad,
+                "Grupo":          grp,
+                "Subgrupo":       sub,
             })
-        return out
+
+        return regs
+
 
 # ─────────────── 9. Salemma ───────────────────────────────
 class SalemmaScraper(HtmlSiteScraper):
