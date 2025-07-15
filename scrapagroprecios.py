@@ -1,24 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Scraper unificado de precios – Py 3.7+ adaptado para GitHub Actions
-Autor  : Diego B. Meza · Rev: 2025-06-29 corrección cuenta alterna
-
-Este script:
-1) Realiza scraping de supermercados Stock, Superseis, Salemma, Arete, Jardines y Biggie.
-2) Clasifica cada producto en Grupo y Subgrupo.
-3) Extrae unidad de medida (g, kg→g, ml, l→cc, unid., paq).
-4) Registra FechaConsulta con fecha+hora+min+seg en zona UTC.
-5) Consolida CSVs diarios y actualiza hoja de Google Sheets.
-Columns: ['ID','Supermercado','Producto','Precio','Unidad','Grupo','Subgrupo','FechaConsulta']
+Scraper unificado de precios – Py 3.7+ (rev 2025-07-15)
+Autor : Diego B. Meza · Adaptación con lista frutihortícola ampliada
 """
-import os
-import sys
-import glob
-import re
-import json
-import unicodedata
-import tempfile
-
+import os, re, unicodedata, glob, json, tempfile, sys
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Set
@@ -37,61 +22,131 @@ from google.oauth2.service_account import Credentials
 # ─────────────────── 0. Configuración ────────────────────
 BASE_DIR        = os.environ.get("BASE_DIR", os.getcwd())
 OUT_DIR         = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))
-FILE_TAG        = "frutihort"
-PATTERN_DAILY   = os.path.join(OUT_DIR, "*.csv")
 SPREADSHEET_URL = os.environ.get("SPREADSHEET_URL")
 CREDS_JSON      = os.environ.get("CREDS_JSON_PATH", os.path.abspath("creds.json"))
 WORKSHEET_NAME  = os.environ.get("WORKSHEET_NAME", "precios_supermercados")
 MAX_WORKERS     = 8
-REQ_TIMEOUT     = 20  # segundos de timeout por request
+REQ_TIMEOUT     = 20  # s
 
 COLUMNS  = ['Supermercado','Producto','Precio','Unidad','Grupo','Subgrupo','FechaConsulta']
 KEY_COLS = ['Supermercado','Producto','FechaConsulta']
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# ────────────────── 1. Utilidades de texto ─────────────────────
+# ─────────────── 1. Utilidades de texto ────────────────
 _token_re = re.compile(r"[a-záéíóúñü]+", re.I)
+
 def strip_accents(txt: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", txt)
                    if unicodedata.category(c) != "Mn")
+
 def tokenize(txt: str) -> List[str]:
     return [strip_accents(t.lower()) for t in _token_re.findall(txt)]
 
-# ─────────────── 2. Clasificación Grupo/Subgrupo ─────────────────
+# ─────────────── 2. Clasificación Grupo/Subgrupo ────────────────
 BROAD_GROUP_KEYWORDS = {
     "Panificados": ["pan","baguette","bizcocho","galleta","masa"],
-    "Frutas":      ["naranja","manzana","banana","pera","uva","frutilla"],
-    "Verduras":    ["tomate","cebolla","papa","zanahoria","lechuga","espinaca"],
+    "Frutas": [
+        # lista ampliada
+        "naranja","manzana","banana","pera","uva","frutilla","limon","mandarina",
+        "sandia","melon","durazno","ciruela","mango","kiwi","papaya","ananá","piña",
+        "pomelo","granada","higo","guayaba","maracuyá","coco"
+    ],
+    "Verduras": [
+        "tomate","cebolla","papa","zanahoria","lechuga","espinaca","zapallito",
+        "zapallo","repollo","brocoli","coliflor","pepino","zucchini","pimiento",
+        "morrón","aji","berenjena","acelga","apio","perejil","cilantro"
+    ],
     "Huevos":      ["huevo","huevos","codorniz"],
     "Lácteos":     ["leche","yogur","queso","manteca","crema"],
+    "Carnes":      ["carne","vacuno","pollo","cerdo","bovina","pescado","lomito"],
+    "Miel":        ["miel"],
 }
-BROAD_TOKENS = {g:{strip_accents(w) for w in ws} for g,ws in BROAD_GROUP_KEYWORDS.items()}
 
+BROAD_TOKENS = {
+    g: {strip_accents(w) for w in ws} for g, ws in BROAD_GROUP_KEYWORDS.items()
+}
+
+# ---------- Inclusión de subgrupos ----------
 SUBGROUP_KEYWORDS = {
-    "Naranja": ["naranja","naranjas"],
-    "Cebolla": ["cebolla","cebollas"],
-    "Leche Entera": ["entera"],
-    "Leche Descremada": ["descremada"],
-    "Queso Paraguay": ["paraguay"],
-    "Huevo Gallina": ["gallina"],
-    "Huevo Codorniz": ["codorniz"],
+    # frutas / verduras
+    "Tomate":           ["tomate","tomates"],
+    "Papa":             ["papa","papas"],
+    "Cebolla":          ["cebolla","cebollas"],
+    "Zanahoria":        ["zanahoria","zanahorias"],
+    "Lechuga":          ["lechuga","lechugas"],
+    "Espinaca":         ["espinaca","espinacas"],
+    "Zapallo":          ["zapallo","zapallito","zapallitos"],
+    "Repollo":          ["repollo","repollos"],
+    "Pepino":           ["pepino","pepinos"],
+    "Pimiento":         ["pimiento","pimientos","morrón","morrones","aji","ajíes"],
+    "Banana":           ["banana","bananas"],
+    "Manzana":          ["manzana","manzanas"],
+    "Naranja":          ["naranja","naranjas"],
+    "Limón":            ["limon","limones"],
+    "Mandarina":        ["mandarina","mandarinas"],
+    "Sandía":           ["sandia","sandías","sandía"],
+    "Melón":            ["melon","melón","melones"],
+    # proteínas
+    "Carne Vacuna":     ["carne vacuna","vacuna","vacuno","bovina","res","lomito","lomo","picanha"],
+    "Carne de Pollo":   ["pollo","pechuga","muslo","alita"],
+    "Carne de Cerdo":   ["cerdo","bondiola","costilla","panceta","jamon"],
+    # lácteos / otros
+    "Leche de Vaca":    ["leche","entera","descremada"],
+    "Queso Paraguay":   ["queso paraguay","queso pyo","queso paraguayo"],
+    "Miel de Abeja":    ["miel","abeja"],
+    "Huevo Gallina":    ["huevo","gallina","huevos"],
+    "Huevo Codorniz":   ["codorniz","huevo codorniz"],
 }
-SUB_TOKENS = {sg:{strip_accents(w) for w in ws} for sg,ws in SUBGROUP_KEYWORDS.items()}
 
+SUB_TOKENS = {
+    sg: {strip_accents(w) for w in ws}
+    for sg, ws in SUBGROUP_KEYWORDS.items()
+}
+
+# ---------- Exclusiones por subgrupo ----------
+SUBGROUP_EXCLUDE = {
+    # no queremos clasificar 'jugo de tomate' como Tomate fresco
+    "Tomate": {"jugo"},
+    # ejemplo: no etiquetar 'condimento para pollo' como Carne de Pollo
+    "Carne de Pollo": {"condimento","milanesa","empanada","vegetal"},
+}
+
+# ────────── Función de clasificación (con exclusión) ──────────
 def classify(name: str) -> (str, str):
     toks = set(tokenize(name))
     grp = next((g for g, ks in BROAD_TOKENS.items() if toks & ks), "")
-    sub = next((s for s, ks in SUB_TOKENS.items() if toks & ks), "")
+
+    sub = ""
+    for sg, inc in SUB_TOKENS.items():
+        if toks & inc:
+            excl = SUBGROUP_EXCLUDE.get(sg, set())
+            if toks & excl:
+                continue          # contiene palabra excluyente
+            sub = sg
+            break
     return grp, sub
 
-# ─────────────── 2.5. Filtro de exclusión opcional ─────────────────
-EXCLUDE_PATTERNS = [r"\bcombo\b", r"\bpack\b", r"\bdisney\b"]
+# ───────────── 2.5. Filtro global de exclusión ─────────────
+EXCLUDE_KEYWORDS = {
+    # Lácteos (cosmética / snacks), Carnicería & Panadería listadas:
+    "celulitis","corporal","fusifar","estrias","aciclovir","tatakua","peinar","sebrinal",
+    "neutrogena","classic","facial","rolls","dental","helado","copita","chorizo","bombon",
+    "cheetos","pipoca","bimbo","antiarrugas","estuche","coquito","humectante","nivea",
+    "manos","lactovit","hidrat","paspadura","daily","maja","secos","queso",
+    "perro","gato","milanesa","sadinesa","condimento","empanada","pan","fideo","tarta","sandwich",
+    "ravioles","pepinillos","coxinhas","alimento","aves","arroz","oceanica","paella",
+    "shampoo","pantoprazol","yerba","jabon","gastiflat","panasonic","pantene","pancho","tostada",
+}
+EXCLUDE_PATTERNS = [r"\b"+re.escape(w)+r"\b" for w in EXCLUDE_KEYWORDS] + [
+    r"\bcombo\b", r"\bpack\b", r"\bdisney\b"
+]
 _ex_re = re.compile("|".join(EXCLUDE_PATTERNS), re.I)
+
 def is_excluded(name: str) -> bool:
     return bool(_ex_re.search(name))
 
-# ─────────────── 3. Extracción de unidad ─────────────────────────────
+# ─────────── 3. Extracción de unidad de medida ────────────
 _unit_re = re.compile(
     r"(?P<val>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilos?|g|gr|ml|cc|l(?:itro)?s?|lt|unid(?:ad)?s?|u|paq|stk)\b",
     re.I
@@ -115,11 +170,12 @@ def extract_unit(name: str) -> str:
     val_str = str(int(val)) if val.is_integer() else f"{val:.2f}".rstrip('0').rstrip('.')
     return f"{val_str}{unit_out}"
 
-# ─────────────── 4. Normalización de precio ───────────────────────────
+# ─────────── 4. Normalización de precios ────────────
 _price_selectors = [
     "[data-price]","[data-price-final]","[data-price-amount]",
-    "meta[itemprop='price']","span.price ins span.amount","span.price > span.amount",
-    "span.woocommerce-Price-amount","span.amount","bdi","div.price","p.price"
+    "meta[itemprop='price']","span.price ins span.amount",
+    "span.price > span.amount","span.woocommerce-Price-amount",
+    "span.amount","bdi","div.price","p.price"
 ]
 def norm_price(val) -> float:
     txt = re.sub(r"[^\d,\.]", "", str(val)).replace('.', '').replace(',', '.')
@@ -130,38 +186,34 @@ def norm_price(val) -> float:
 
 def _first_price(node: Tag) -> float:
     for attr in ("data-price","data-price-final","data-price-amount"):
-        if node.has_attr(attr) and norm_price(node[attr])>0:
+        if node.has_attr(attr) and norm_price(node[attr]) > 0:
             return norm_price(node[attr])
     meta = node.select_one("meta[itemprop='price']")
-    if meta and norm_price(meta.get('content',''))>0:
+    if meta and norm_price(meta.get('content','')) > 0:
         return norm_price(meta.get('content',''))
     for sel in _price_selectors:
         el = node.select_one(sel)
         if el:
             p = norm_price(el.get_text() or el.get(sel,''))
-            if p>0:
+            if p > 0:
                 return p
     return 0.0
 
-# ─────────────── 5. HTTP session robusta ───────────────────────────
+# ─────────── 5. Sesión HTTP robusta ────────────
 def _build_session() -> requests.Session:
-    retry = Retry(
-        total=4,
-        backoff_factor=1.5,
-        status_forcelist=(429,500,502,503,504),
-        allowed_methods=("GET","HEAD")
-    )
+    retry = Retry(total=4, backoff_factor=1.5,
+                  status_forcelist=(429,500,502,503,504),
+                  allowed_methods=("GET","HEAD"))
     s = requests.Session()
     s.headers.update({
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (compatible; preciosbot/1.0)",
         "Accept-Language": "es-ES,es;q=0.9",
     })
     adapter = HTTPAdapter(max_retries=retry)
-    s.mount("http://", adapter)
-    s.mount("https://", adapter)
+    s.mount("http://", adapter); s.mount("https://", adapter)
     return s
 
-# ─────────────── 6. Clase base scraper ───────────────────────────────
+# ─────────── 6. Clase base scraper ────────────
 class HtmlSiteScraper:
     def __init__(self, name: str, base: str):
         self.name = name
@@ -170,39 +222,30 @@ class HtmlSiteScraper:
 
     def category_urls(self) -> List[str]:
         raise NotImplementedError
-
     def parse_category(self, url: str) -> List[Dict]:
         raise NotImplementedError
 
     def scrape(self) -> List[Dict]:
         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        rows = []
+        rows: List[Dict] = []
         with ThreadPoolExecutor(MAX_WORKERS) as pool:
-            futures = [pool.submit(self.parse_category, u) for u in self.category_urls()]
-            for fut in as_completed(futures):
+            futs = [pool.submit(self.parse_category, u) for u in self.category_urls()]
+            for fut in as_completed(futs):
                 try:
                     for r in fut.result():
                         if r.get("Precio", 0) <= 0:
                             continue
                         r["FechaConsulta"] = ts
-                        rows.append({
-                            'Supermercado': r['Supermercado'],
-                            'Producto':      r['Producto'],
-                            'Precio':        r['Precio'],
-                            'Unidad':        r['Unidad'],
-                            'Grupo':         r['Grupo'],
-                            'Subgrupo':      r['Subgrupo'],
-                            'FechaConsulta': r['FechaConsulta'],
-                        })
+                        rows.append({k: r.get(k,"") for k in COLUMNS})
                 except Exception as e:
                     print(f"[{self.name}] WARN {e}")
         return rows
 
     def save_csv(self, rows: List[Dict]):
-        if not rows:
-            return
-        fn = f"{self.name}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
-        pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR, fn), index=False)
+        if rows:
+            fn = f"{self.name}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
+            pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR, fn), index=False)
+
 
 # ─────────────── 7. Stock ───────────────────────────────
 class StockScraper(HtmlSiteScraper):
@@ -475,25 +518,26 @@ class BiggieScraper:
         fn = f"{self.name}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
         pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR, fn), index=False)
 
-# ─────────────── 12. Registro de scrapers ─────────────────────────
+
+# ─────────── 12. Registro de scrapers ────────────
 SCRAPERS = {
-    'stock':      StockScraper,
-    'superseis':  SuperseisScraper,
-    'salemma':    SalemmaScraper,
-    'arete':      AreteScraper,
-    'losjardines':JardinesScraper,
-    'biggie':     BiggieScraper,
+    'stock':        StockScraper,
+    'superseis':    SuperseisScraper,
+    'salemma':      SalemmaScraper,
+    'arete':        AreteScraper,
+    'losjardines':  JardinesScraper,
+    'biggie':       BiggieScraper,
 }
 
-# ─────────────── 13. Google Sheets & Orquestador ─────────────────
+# ─────────── 13. Google Sheets y orquestador ────────────
 def _open_sheet():
     scopes = [
         'https://www.googleapis.com/auth/drive',
         'https://www.googleapis.com/auth/spreadsheets',
     ]
     cred = Credentials.from_service_account_file(CREDS_JSON, scopes=scopes)
-    gc   = gspread.authorize(cred)
-    sh   = gc.open_by_url(SPREADSHEET_URL)
+    gc = gspread.authorize(cred)
+    sh = gc.open_by_url(SPREADSHEET_URL)
 
     try:
         ws = sh.worksheet(WORKSHEET_NAME)
@@ -501,62 +545,41 @@ def _open_sheet():
     except gspread.exceptions.WorksheetNotFound:
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows='10000', cols='40')
         df = pd.DataFrame(columns=COLUMNS)
-
     return ws, df
 
 def _write_sheet(ws, df: pd.DataFrame):
     ws.clear()
-    set_with_dataframe(ws, df[['ID'] + COLUMNS], include_index=False)
+    set_with_dataframe(ws, df[['ID']+COLUMNS], include_index=False)
 
 def main() -> None:
-    # 1) Ejecutar todos los scrapers y coleccionar filas nuevas
-    all_rows = []
+    all_rows: List[Dict] = []
     for cls in SCRAPERS.values():
-        inst = cls()
-        rows = inst.scrape()
-        inst.save_csv(rows)
+        spider = cls()
+        rows = spider.scrape()
+        spider.save_csv(rows)
         all_rows.extend(rows)
 
     if not all_rows:
-        print("Sin datos nuevos.")
-        return
+        print("Sin datos nuevos."); return
 
-    # 2) Convertir a DataFrame y formatear FechaConsulta
-    df_all = pd.DataFrame(all_rows)
-    df_all = df_all[COLUMNS].copy()
-    df_all["FechaConsulta"] = pd.to_datetime(
-        df_all["FechaConsulta"], errors="coerce"
-    )
+    df_all = pd.DataFrame(all_rows)[COLUMNS].copy()
+    df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
 
-    # 3) Leer lo que ya está en la hoja
     ws, prev_df = _open_sheet()
-    # Asegúrate de que prev_df tenga las mismas columnas y tipo datetime
     prev_df = prev_df[COLUMNS].copy()
-    prev_df["FechaConsulta"] = pd.to_datetime(
-        prev_df["FechaConsulta"], errors="coerce"
-    )
+    prev_df["FechaConsulta"] = pd.to_datetime(prev_df["FechaConsulta"], errors="coerce")
 
-    # 4) Detectar SOLO las filas que NO existen aún
-    #    Creamos índices basados en las KEY_COLS para comparar
     idx_prev = prev_df.set_index(KEY_COLS).index
     idx_all  = df_all.set_index(KEY_COLS).index
     new_idx  = idx_all.difference(idx_prev)
-
     if new_idx.empty:
-        print("No hay filas nuevas para añadir.")
-        return
+        print("No hay filas nuevas para añadir."); return
 
-    # 5) Extraer y preparar esas filas nuevas
     new_rows = df_all.set_index(KEY_COLS).loc[new_idx].reset_index()
-    # Asignar IDs consecutivos: si ya hay N previos, empezamos en N+1
     start_id = len(prev_df) + 1
     new_rows.insert(0, "ID", range(start_id, start_id + len(new_rows)))
-    # Volver FechaConsulta a string
     new_rows["FechaConsulta"] = new_rows["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 6) Hacer append en lugar de clear+write
-    #    La primera fila de datos (después del header) es la fila 2, así que
-    #    row = len(prev_df) + 2
     set_with_dataframe(
         ws,
         new_rows[["ID"] + COLUMNS],
@@ -564,9 +587,8 @@ def main() -> None:
         include_index=False,
         include_column_header=False
     )
-
     print(f"Añadidas {len(new_rows)} filas nuevas a la hoja.")
-
 
 if __name__ == "__main__":
     main()
+
