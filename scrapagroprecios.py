@@ -530,22 +530,33 @@ SCRAPERS = {
 }
 
 # ─────────── 13. Google Sheets y orquestador ────────────
+# ───────── 13. Google Sheets y orquestador ─────────
+CELL_LIMIT   = 9_500_000          # pequeño margen de seguridad
+WS_BASE_NAME = "precios_supermercados"
+ROWS_BUFFER  = 200_000            # filas máximas por hoja (~34 cols ⇒ 6,8 M celdas)
+
+def _get_yearly_ws(sheet):
+    """Abre (o crea) una hoja tipo precios_supermercados_2025."""
+    yr = datetime.utcnow().strftime("%Y")
+    title = f"{WS_BASE_NAME}_{yr}"
+    try:
+        return sheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        # crea con 100 000 filas y 40 columnas
+        return sheet.add_worksheet(title=title, rows="100000", cols="40")
+
 def _open_sheet():
     scopes = [
-        'https://www.googleapis.com/auth/drive',
-        'https://www.googleapis.com/auth/spreadsheets',
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets",
     ]
     cred = Credentials.from_service_account_file(CREDS_JSON, scopes=scopes)
-    gc = gspread.authorize(cred)
-    sh = gc.open_by_url(SPREADSHEET_URL)
+    sh   = gspread.authorize(cred).open_by_url(SPREADSHEET_URL)
 
-    try:
-        ws = sh.worksheet(WORKSHEET_NAME)
-        df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows='10000', cols='40')
-        df = pd.DataFrame(columns=COLUMNS)
+    ws = _get_yearly_ws(sh)
+    df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how="all")
     return ws, df
+
 
 def _write_sheet(ws, df: pd.DataFrame):
     ws.clear()
@@ -566,28 +577,50 @@ def main() -> None:
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
 
     ws, prev_df = _open_sheet()
+    # ------------------------------------------------------------------
+    # ❶ Detectar filas nuevas
+    # ------------------------------------------------------------------
     prev_df = prev_df[COLUMNS].copy()
     prev_df["FechaConsulta"] = pd.to_datetime(prev_df["FechaConsulta"], errors="coerce")
-
+    df_all["FechaConsulta"]  = pd.to_datetime(df_all["FechaConsulta"],  errors="coerce")
     idx_prev = prev_df.set_index(KEY_COLS).index
     idx_all  = df_all.set_index(KEY_COLS).index
     new_idx  = idx_all.difference(idx_prev)
     if new_idx.empty:
-        print("No hay filas nuevas para añadir."); return
+        print("No hay filas nuevas."); return
 
     new_rows = df_all.set_index(KEY_COLS).loc[new_idx].reset_index()
     start_id = len(prev_df) + 1
     new_rows.insert(0, "ID", range(start_id, start_id + len(new_rows)))
     new_rows["FechaConsulta"] = new_rows["FechaConsulta"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    set_with_dataframe(
+    # ------------------------------------------------------------------
+    # ❷ Antes de escribir, comprueba que no superes el límite
+    # ------------------------------------------------------------------
+    future_rows = len(prev_df) + len(new_rows)
+    total_cells = future_rows * ws.col_count
+    if total_cells >= CELL_LIMIT:
+        print("Hoja a punto de superar el límite; creando hoja nueva…")
+        # crea una hoja nueva con sufijo _YYYY_MM
+        new_title = f"{WS_BASE_NAME}_{datetime.utcnow():%Y_%m}"
+        ws = ws.spreadsheet.add_worksheet(title=new_title, rows="100000", cols="40")
+        prev_df = pd.DataFrame(columns=COLUMNS)  # reiniciamos índice
+        start_id = 1
+        new_rows["ID"] = range(start_id, start_id + len(new_rows))
+
+    # ------------------------------------------------------------------
+    # ❸ Escribimos SOLO las filas nuevas (sin redimensionar)
+    # ------------------------------------------------------------------
+    gspread_dataframe.set_with_dataframe(
         ws,
         new_rows[["ID"] + COLUMNS],
         row=len(prev_df) + 2,
         include_index=False,
-        include_column_header=False
+        include_column_header=False,
+        resize=False       # ← evita llamada a worksheet.resize()
     )
-    print(f"Añadidas {len(new_rows)} filas nuevas a la hoja.")
+    print(f"Añadidas {len(new_rows)} filas a '{ws.title}'.")
+
 
 if __name__ == "__main__":
     main()
