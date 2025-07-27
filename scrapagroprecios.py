@@ -1,14 +1,9 @@
 import os
-import sys
-import glob
 import re
-import json
 import unicodedata
-import tempfile
-
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict, Tuple
 from urllib.parse import urljoin
 
 import pandas as pd
@@ -23,36 +18,31 @@ from google.oauth2.service_account import Credentials
 
 # ─────────────────── 0. Configuración ────────────────────
 BASE_DIR        = os.environ.get("BASE_DIR", os.getcwd())
-OUT_DIR         = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))
-FILE_TAG        = "frutihort"
-PATTERN_DAILY   = os.path.join(OUT_DIR, "*.csv")
+OUT_DIR         = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))  # no se usa, pero se mantiene por compatibilidad
 SPREADSHEET_URL = os.environ.get("SPREADSHEET_URL")
 CREDS_JSON      = os.environ.get("CREDS_JSON_PATH", os.path.abspath("creds.json"))
 WORKSHEET_NAME  = os.environ.get("WORKSHEET_NAME", "precios_supermercados")
 MAX_WORKERS     = 8
 REQ_TIMEOUT     = 20  # segundos de timeout por request
 
-# Esquema con nueva columna ClasificaProducto
-COLUMNS  = [
+# Esquema base requerido (sin columna ID; no se forzará su creación)
+REQUIRED_COLUMNS = [
     'Supermercado','Producto','Precio','Unidad',
     'Grupo','Subgrupo','ClasificaProducto','FechaConsulta'
 ]
 KEY_COLS = ['Supermercado','Producto','FechaConsulta']
 
-os.makedirs(OUT_DIR, exist_ok=True)
-
 # ────────────────── 1. Utilidades de texto ─────────────────────
-_token_re = re.compile(r"[a-záéíóúñü]+", re.I)
-
 def strip_accents(txt: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", txt)
                    if unicodedata.category(c) != "Mn")
 
 def normalize_text(txt: str) -> str:
-    return strip_accents(txt).lower()
+    return strip_accents(str(txt)).lower()
 
 def tokenize(txt: str) -> List[str]:
-    return [strip_accents(t.lower()) for t in _token_re.findall(txt)]
+    import re as _re
+    return [strip_accents(t.lower()) for t in _re.findall(r"[a-záéíóúñü]+", str(txt), flags=_re.I)]
 
 # ─────────────── 2. Clasificación Grupo/Subgrupo ─────────────────
 BROAD_GROUP_KEYWORDS = {
@@ -81,88 +71,48 @@ def classify_group_subgroup(name: str) -> Tuple[str, str]:
     sub = next((s for s, ks in SUB_TOKENS.items() if toks & ks), "")
     return grp, sub
 
-# ─────────────── 2.1. Clasificación "fresco": ClasificaProducto ───────────────
-# Se normaliza la descripción (minúsculas, sin tildes) para robustez.
-# Reglas inspiradas en el JS compartido; exclusiones y categorías replicadas.
-
-# Exclusiones generales para procesados
+# ─────────────── 2.1. Clasificación “fresco” (ClasificaProducto) ───────────────
+import re
 EXCLUSIONES_GENERALES_RE = re.compile(
     r"\b(extracto|jugo|sabor|pulpa|pure|salsa|lata|en\s+conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|mermelada|chips|snack|polvo|humo)\b"
 )
-
-# Patrones específicos por rubro "fresco"
 TOMATE_EXC_RE = re.compile(
     r"(arroz\s+con\s+tomate|en\s+tomate|salsa(\s+de)?\s+tomate|ketchup|tomate\s+en\s+polvo|tomate\s+en\s+lata|extracto|jugo|pulpa|pure|congelad[oa]|deshidratad[oa])"
 )
-CEBOLLA_EXC_RE = re.compile(
-    r"(en\s+polvo|salsa|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|crema|sopa)"
-)
-PAPA_EXC_RE = re.compile(
-    r"(chips|frita|fritas|chuño|pure|congelad[oa]|deshidratad[oa]|harina|sopa|snack)"
-)
-ZANAHORIA_EXC_RE = re.compile(
-    r"(jugo|pure|conserva|congelad[oa]|deshidratad[oa]|salsa|tarta|pastel|mermelada)"
-)
-REMOLACHA_EXC_RE = re.compile(
-    r"(en\s+lata|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|jugo|pulpa|mermelada)"
-)
-BANANA_EXC_RE = re.compile(
-    r"(harina|polvo|chips|frita|dulce|mermelada|batido|jugo|snack|pure|congelad[oa]|deshidratad[oa])"
-)
-CITRICOS_EXC_RE = re.compile(
-    r"(jugo|mermelada|concentrad[oa]|esencia|sabor|pulpa|congelad[oa]|deshidratad[oa]|dulce|jarabe)"
-)
+CEBOLLA_EXC_RE = re.compile(r"(en\s+polvo|salsa|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|crema|sopa)")
+PAPA_EXC_RE    = re.compile(r"(chips|frita|fritas|chuño|pure|congelad[oa]|deshidratad[oa]|harina|sopa|snack)")
+ZANAHORIA_EXC_RE = re.compile(r"(jugo|pure|conserva|congelad[oa]|deshidratad[oa]|salsa|tarta|pastel|mermelada)")
+REMOLACHA_EXC_RE = re.compile(r"(en\s+lata|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|jugo|pulpa|mermelada)")
+BANANA_EXC_RE    = re.compile(r"(harina|polvo|chips|frita|dulce|mermelada|batido|jugo|snack|pure|congelad[oa]|deshidratad[oa])")
+CITRICOS_EXC_RE  = re.compile(r"(jugo|mermelada|concentrad[oa]|esencia|sabor|pulpa|congelad[oa]|deshidratad[oa]|dulce|jarabe)")
 
 def clasifica_producto(descripcion: str) -> str:
-    if not descripcion:
-        return ""
     d = normalize_text(descripcion)
-
-    # Tomate fresco
+    if not d:
+        return ""
     if "tomate" in d and not TOMATE_EXC_RE.search(d):
         return "Tomate fresco"
-
-    # Morrón rojo / locote / pimiento rojo
     tiene_morron = any(k in d for k in ("morron","locote","pimiento","pimenton"))
     if tiene_morron and "rojo" in d and not re.search(r"(salsa|mole|pasta|conserva|encurtido|en\s+vinagre|en\s+lata|molid[oa]|deshidratad[oa]|congelad[oa]|pulpa|pate)", d):
         return "Morrón rojo"
-
-    # Cebolla fresca
     if "cebolla" in d and not CEBOLLA_EXC_RE.search(d):
         return "Cebolla fresca"
-
-    # Papa fresca
     if ("papa" in d or "patata" in d) and not PAPA_EXC_RE.search(d):
         return "Papa fresca"
-
-    # Zanahoria fresca
     if "zanahoria" in d and not ZANAHORIA_EXC_RE.search(d):
         return "Zanahoria fresca"
-
-    # Lechuga fresca
     if "lechuga" in d and not re.search(r"(ensalada\s+procesada|mix\s+de\s+ensaladas|congelad[oa]|deshidratad[oa])", d):
         return "Lechuga fresca"
-
-    # Remolacha fresca
     if "remolacha" in d and not REMOLACHA_EXC_RE.search(d):
         return "Remolacha fresca"
-
-    # Rúcula fresca
     if ("rucula" in d or "arugula" in d) and not EXCLUSIONES_GENERALES_RE.search(d):
         return "Rúcula fresca"
-
-    # Berro fresco
     if "berro" in d and not EXCLUSIONES_GENERALES_RE.search(d):
         return "Berro fresco"
-
-    # Banana/Plátano/Guineo fresco
     if any(k in d for k in ("banana","banano","platano","guineo")) and not BANANA_EXC_RE.search(d):
         return "Banana fresca"
-
-    # Cítricos frescos: naranja, mandarina, pomelo, limón, apepú
     if any(k in d for k in ("naranja","mandarina","pomelo","limon","apepu")) and not CITRICOS_EXC_RE.search(d):
         return "Cítrico fresco"
-
     return ""
 
 # ─────────────── 2.5. Filtro de exclusión opcional ─────────────────
@@ -256,10 +206,12 @@ class HtmlSiteScraper:
 
     def scrape(self) -> List[Dict]:
         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-        rows = []
+        rows: List[Dict] = []
+        urls = self.category_urls()
+        if not urls:
+            return rows
         with ThreadPoolExecutor(MAX_WORKERS) as pool:
-            futures = [pool.submit(self.parse_category, u) for u in self.category_urls()]
-            for fut in as_completed(futures):
+            for fut in as_completed([pool.submit(self.parse_category, u) for u in urls]):
                 try:
                     for r in fut.result():
                         if r.get("Precio", 0) <= 0:
@@ -276,17 +228,10 @@ class HtmlSiteScraper:
                             'FechaConsulta': r['FechaConsulta'],
                         })
                 except Exception:
-                    # Silencioso para no imprimir
                     pass
         return rows
 
-    def save_csv(self, rows: List[Dict]):
-        if not rows:
-            return
-        fn = f"{self.name}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
-        pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR, fn), index=False)
-
-# ─────────────── 7. Stock ───────────────────────────────
+# ─────────────── 7. Scrapers ───────────────────────────────
 class StockScraper(HtmlSiteScraper):
     def __init__(self):
         super().__init__('stock', 'https://www.stock.com.py')
@@ -299,7 +244,7 @@ class StockScraper(HtmlSiteScraper):
             )
         except Exception:
             return []
-        kws = [tok for lst in BROAD_GROUP_KEYWORDS.values() for tok in lst]
+        kws = [t for lst in BROAD_GROUP_KEYWORDS.values() for t in lst]
         return [
             urljoin(self.base_url, a['href'])
             for a in soup.select('a[href*="/category/"]')
@@ -338,7 +283,6 @@ class StockScraper(HtmlSiteScraper):
             })
         return out
 
-# ─────────────── 8. Superseis ───────────────────────────────
 class SuperseisScraper(HtmlSiteScraper):
     def __init__(self):
         super().__init__("superseis", "https://www.superseis.com.py")
@@ -363,7 +307,6 @@ class SuperseisScraper(HtmlSiteScraper):
             r.raise_for_status()
         except Exception:
             return regs
-
         soup = BeautifulSoup(r.content, "html.parser")
         for a in soup.find_all("a", class_="product-title-link"):
             nombre = a.get_text(strip=True)
@@ -388,10 +331,8 @@ class SuperseisScraper(HtmlSiteScraper):
                 "Subgrupo":       sub,
                 "ClasificaProducto": cp
             })
-
         return regs
 
-# ─────────────── 9. Salemma ───────────────────────────────
 class SalemmaScraper(HtmlSiteScraper):
     def __init__(self):
         super().__init__('salemma', 'https://www.salemmaonline.com.py')
@@ -441,7 +382,6 @@ class SalemmaScraper(HtmlSiteScraper):
             })
         return out
 
-# ─────────────── 10. Arete y Jardines ─────────────────────────
 class AreteScraper(HtmlSiteScraper):
     def __init__(self):
         super().__init__('arete', 'https://www.arete.com.py')
@@ -499,7 +439,6 @@ class JardinesScraper(AreteScraper):
         self.name = 'losjardines'
         self.base_url = 'https://losjardinesonline.com.py'
 
-# ─────────────── 11. Biggie (API) ─────────────────────────────
 class BiggieScraper:
     name = 'biggie'
     API  = 'https://api.app.biggie.com.py/api/articles'
@@ -508,9 +447,6 @@ class BiggieScraper:
 
     def __init__(self):
         self.session = _build_session()
-
-    def category_urls(self) -> List[str]:
-        return self.GROUPS
 
     def parse_category(self, grp: str) -> List[Dict]:
         out: List[Dict] = []
@@ -555,13 +491,7 @@ class BiggieScraper:
                 rows.append(r)
         return rows
 
-    def save_csv(self, rows: List[Dict]):
-        if not rows:
-            return
-        fn = f"{self.name}_{datetime.utcnow():%Y%m%d_%H%M%S}.csv"
-        pd.DataFrame(rows)[COLUMNS].to_csv(os.path.join(OUT_DIR, fn), index=False)
-
-# ─────────────── 12. Registro de scrapers ─────────────────────────
+# Registro de scrapers
 SCRAPERS = {
     'stock':       StockScraper,
     'superseis':   SuperseisScraper,
@@ -571,7 +501,7 @@ SCRAPERS = {
     'biggie':      BiggieScraper,
 }
 
-# ─────────────── 13. Google Sheets & Orquestador ─────────────────
+# ─────────────── 13. Google Sheets (sin borrar datos) ─────────────────
 def _open_sheet():
     scopes = [
         'https://www.googleapis.com/auth/drive',
@@ -585,83 +515,97 @@ def _open_sheet():
         ws = sh.worksheet(WORKSHEET_NAME)
         df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
     except gspread.exceptions.WorksheetNotFound:
+        # Si no existe, se crea con encabezado requerido
         ws = sh.add_worksheet(title=WORKSHEET_NAME, rows='10000', cols='60')
-        df = pd.DataFrame(columns=COLUMNS)
-        # Garantiza encabezado inicial
-        header_df = pd.DataFrame(columns=["ID"] + COLUMNS)
-        set_with_dataframe(ws, header_df, include_index=False)
+        # Escribimos sólo la fila de encabezado (no borra nada porque es hoja nueva)
+        ws.update('A1', [REQUIRED_COLUMNS])
+        df = pd.DataFrame(columns=REQUIRED_COLUMNS)
     return ws, df
 
-def _align_schema(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    df = df.copy()
-    # Añadir faltantes
-    for c in columns:
-        if c not in df.columns:
-            df[c] = "" if c != "Precio" else pd.NA
-    # Reordenar y limitar
-    df = df[[c for c in columns]]
-    return df
+def _ensure_required_columns(ws) -> List[str]:
+    """Garantiza que el encabezado contenga al menos las columnas REQUIRED_COLUMNS.
+       Si faltan, las agrega al final sin borrar datos.
+       Devuelve la lista de columnas del encabezado final.
+    """
+    header = ws.row_values(1)
+    header = [h for h in header if h]  # limpiar vacíos al final, si hay
+    if not header:
+        header = REQUIRED_COLUMNS.copy()
+        ws.update('A1', [header])
+        return header
 
-def _ensure_header(ws, columns: List[str]) -> None:
-    # Lee encabezado actual y rehace si no coincide
-    try:
-        hdr = ws.row_values(1)
-    except Exception:
-        hdr = []
-    expected = ["ID"] + columns
-    if hdr != expected:
-        header_df = pd.DataFrame(columns=expected)
-        ws.clear()
-        set_with_dataframe(ws, header_df, include_index=False)
+    missing = [c for c in REQUIRED_COLUMNS if c not in header]
+    if not missing:
+        return header
+
+    new_header = header + missing
+    # Asegurar cantidad de columnas físicas
+    if ws.col_count < len(new_header):
+        ws.add_cols(len(new_header) - ws.col_count)
+    # Actualizar SOLO la fila 1 completa con el nuevo encabezado (no toca datos)
+    ws.update('A1', [new_header])
+    return new_header
+
+def _align_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Alinea el DF a un conjunto de columnas (agrega faltantes vacías y reordena)."""
+    out = df.copy()
+    for c in columns:
+        if c not in out.columns:
+            out[c] = "" if c != "Precio" else pd.NA
+    return out[columns]
 
 def main() -> None:
     # 1) Ejecutar scrapers y recolectar
     all_rows: List[Dict] = []
-    for cls in SCRAPERS.values():
+    for name, cls in SCRAPERS.items():
         inst = cls()
         rows = inst.scrape()
-        inst.save_csv(rows)
-        all_rows.extend(rows)
+        if rows:
+            all_rows.extend(rows)
 
     if not all_rows:
         return
 
-    # 2) DF consolidado y formateo de FechaConsulta
+    # 2) Consolidado y tipos
     df_all = pd.DataFrame(all_rows)
-    df_all = _align_schema(df_all, COLUMNS)
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
 
-    # 3) Leer hoja y alinear esquema
+    # 3) Abrir hoja, asegurar encabezado, y leer DF previo
     ws, prev_df = _open_sheet()
-    _ensure_header(ws, COLUMNS)
-
+    header = _ensure_required_columns(ws)  # no borra datos; añade columnas faltantes
+    # Releer prev_df si estaba vacío pero ahora hay nuevas columnas? No necesario; lo alineamos:
     if prev_df.empty:
-        prev_df = pd.DataFrame(columns=COLUMNS)
-    else:
-        # Si la hoja ya existe con esquema anterior, alinear
-        # (get_as_dataframe ya descarta la fila de encabezados)
-        prev_df = _align_schema(prev_df, COLUMNS)
-        prev_df["FechaConsulta"] = pd.to_datetime(prev_df["FechaConsulta"], errors="coerce")
+        prev_df = pd.DataFrame(columns=header)
+    prev_df = _align_df_columns(prev_df, header)
+    # Alinear df_all a REQUIRED_COLUMNS, y luego reordenarlo según header para escribir
+    df_all = _align_df_columns(df_all, REQUIRED_COLUMNS)
 
-    # 4) Detectar filas nuevas por KEY_COLS
+    # 4) Detección de filas nuevas por KEY_COLS
+    #    Asegurar que prev_df tenga KEY_COLS (si encabezado previo no los tenía, ya se agregaron vacíos)
+    for c in KEY_COLS:
+        if c not in prev_df.columns:
+            prev_df[c] = ""
     idx_prev = prev_df.set_index(KEY_COLS).index if not prev_df.empty else pd.Index([])
     idx_all  = df_all.set_index(KEY_COLS).index
     new_idx  = idx_all.difference(idx_prev)
-
     if new_idx.empty:
         return
 
-    # 5) Preparar filas nuevas con ID consecutivo
+    # 5) Preparar filas nuevas y ordenarlas según encabezado actual
     new_rows = df_all.set_index(KEY_COLS).loc[new_idx].reset_index()
-    start_id = (len(prev_df) + 1) if not prev_df.empty else 1
-    new_rows.insert(0, "ID", range(start_id, start_id + len(new_rows)))
-    new_rows["FechaConsulta"] = pd.to_datetime(new_rows["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    # Orden de columnas a escribir = orden del encabezado
+    cols_to_write = [c for c in header if c in new_rows.columns]
+    new_rows = new_rows[cols_to_write]
+    # Formato de FechaConsulta como texto
+    if "FechaConsulta" in new_rows.columns:
+        new_rows["FechaConsulta"] = pd.to_datetime(new_rows["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    # 6) Append sin reescribir toda la hoja
+    # 6) Append sin borrar la hoja
+    start_row = (len(prev_df) + 2)  # primera fila libre (considerando encabezado)
     set_with_dataframe(
         ws,
-        new_rows[["ID"] + COLUMNS],
-        row=len(prev_df) + 2,
+        new_rows,
+        row=start_row,
         include_index=False,
         include_column_header=False
     )
