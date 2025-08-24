@@ -4,7 +4,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from urllib.parse import urljoin
 
 import pandas as pd
@@ -14,7 +14,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import gspread
-from gspread_dataframe import get_as_dataframe  # solo leer, no escribir
+from gspread_dataframe import get_as_dataframe  # sólo lectura
 from google.oauth2.service_account import Credentials
 
 # ─────────────────── 0. Configuración ────────────────────
@@ -26,10 +26,13 @@ WORKSHEET_NAME  = os.environ.get("WORKSHEET_NAME", "precios_supermercados")
 MAX_WORKERS     = 8
 REQ_TIMEOUT     = 20  # segundos
 
-# Esquema base requerido
+# Esquema base requerido (añadimos campos nuevos solicitados)
 REQUIRED_COLUMNS = [
-    'Supermercado','Producto','Precio','Unidad',
-    'Grupo','Subgrupo','ClasificaProducto','FechaConsulta'
+    'Supermercado','Producto','Precio',
+    'Unidad',              # extracción simple (compatibilidad)
+    'Unidad_corr','Cantidad','Unidades_Separado','Precio_comparable',  # NUEVOS
+    'Grupo','Subgrupo','ClasificaProducto',
+    'FechaConsulta'
 ]
 KEY_COLS = ['Supermercado','Producto','FechaConsulta']
 
@@ -46,33 +49,88 @@ def tokenize(txt: str) -> List[str]:
     return [strip_accents(t.lower()) for t in _re.findall(r"[a-záéíóúñü]+", str(txt), flags=_re.I)]
 
 # ─────────────── 2. Clasificación Grupo/Subgrupo ─────────────────
-BROAD_GROUP_KEYWORDS = {
-    "Panificados": ["pan","baguette","bizcocho","galleta","masa"],
-    "Frutas":      ["naranja","manzana","banana","banano","platano","plátano","pera","uva","frutilla","guineo","mandarina","pomelo","limon","limón","apepu"],
-    "Verduras":    ["tomate","cebolla","papa","patata","zanahoria","lechuga","espinaca","morron","morrón","locote","pimiento","pimenton","pimentón","remolacha","rucula","rúcula","berro"],
-    "Huevos":      ["huevo","huevos","codorniz"],
-    "Lácteos":     ["leche","yogur","queso","manteca","crema"],
+# Taxonomía ampliada (radicalmente mejorada); patrones en minúsculas/acento removido.
+TAXONOMY: Dict[str, Dict[str, List[str]]] = {
+    "Verduras": {
+        "Tomate": ["tomate", "perita", "cherry"],
+        "Cebolla": ["cebolla"],
+        "Papa": ["papa", "patata"],
+        "Zanahoria": ["zanahoria"],
+        "Lechuga": ["lechuga", "capuchina", "mantecosa", "romana"],
+        "Morron": ["morron", "locote", "pimiento", "pimenton"],
+        "Remolacha": ["remolacha"],
+        "Rucula": ["rucula", "arugula"],
+        "Berro": ["berro"],
+        "Pepino": ["pepino"],
+        "Ajo": ["ajo"],
+        "Zapallo": ["zapallo", "calabaza"],
+        "Repollo": ["repollo"],
+        "Cebollita de verdeo": ["verdeo", "cebollita"],
+    },
+    "Frutas": {
+        "Banana": ["banana", "banano", "platano", "guineo"],
+        "Naranja": ["naranja", "apepu"],
+        "Mandarina": ["mandarina"],
+        "Pomelo": ["pomelo"],
+        "Limon": ["limon"],
+        "Manzana": ["manzana"],
+        "Pera": ["pera"],
+        "Uva": ["uva"],
+        "Frutilla": ["frutilla", "fresa"],
+        "Anana": ["anana", "piña"],
+        "Sandia": ["sandia"],
+        "Melon": ["melon"],
+    },
+    "Lacteos": {
+        "Leche Entera": ["leche entera", "entera", "3%", "3,0%", "3.0%"],
+        "Leche Descremada": ["leche descremada", "descremada", "0%", "0,5%", "0.5%"],
+        "Yogur": ["yogur", "yoghurt", "yogurt"],
+        "Queso Paraguay": ["queso paraguay", "paraguay"],
+        "Queso Mozzarella": ["mozzarella", "muzzarella"],
+        "Queso Ricotta": ["ricotta"],
+        "Queso Cuartirolo": ["cuartirolo"],
+        "Manteca": ["manteca", "mantequilla"],
+        "Crema de leche": ["crema de leche", "nata"],
+    },
+    "Huevos": {
+        "Huevo Gallina": ["huevo", "huevos", "docena", "media docena"],
+        "Huevo Codorniz": ["codorniz"],
+    },
+    "Panificados": {
+        "Pan": ["pan", "baguette", "lactal", "sandwich"],
+        "Galleta": ["galleta", "cracker", "cookies"],
+        "Bizcocho": ["bizcocho", "factura"],
+        "Tortilla": ["tortilla"],
+    },
+    "Cereales y Granos": {
+        "Arroz": ["arroz"],
+        "Fideos": ["fideo", "pasta", "spaghetti", "tallarines"],
+        "Harina": ["harina", "trigo 000", "000", "0000"],
+        "Avena": ["avena"],
+        "Legumbres": ["lenteja", "poroto", "garbanzo"],
+    },
+    "Aceites y Grasas": {
+        "Aceite Girasol": ["aceite girasol"],
+        "Aceite Soja": ["aceite soja", "aceite soya"],
+        "Aceite Maiz": ["aceite maiz", "aceite maíz"],
+        "Aceite Oliva": ["aceite oliva", "oliva extra virgen", "extra virgen"],
+    },
+    "Dulces y Azucares": {
+        "Azucar": ["azucar", "azúcar"],
+        "Dulce de leche": ["dulce de leche"],
+        "Mermelada": ["mermelada"],
+        "Cacao": ["cacao", "chocolate en polvo"],
+    },
+    "Bebidas": {
+        "Agua": ["agua", "agua mineral"],
+        "Gaseosa": ["gaseosa", "cola", "coca cola", "pepsi"],
+        "Jugo": ["jugo", "zumo", "nectar", "néctar"],
+        "Cerveza": ["cerveza"],
+        "Vino": ["vino"],
+    },
 }
-BROAD_TOKENS = {g:{strip_accents(w) for w in ws} for g,ws in BROAD_GROUP_KEYWORDS.items()}
 
-SUBGROUP_KEYWORDS = {
-    "Naranja": ["naranja","naranjas"],
-    "Cebolla": ["cebolla","cebollas"],
-    "Leche Entera": ["entera"],
-    "Leche Descremada": ["descremada"],
-    "Queso Paraguay": ["paraguay"],
-    "Huevo Gallina": ["gallina"],
-    "Huevo Codorniz": ["codorniz"],
-}
-SUB_TOKENS = {sg:{strip_accents(w) for w in ws} for sg,ws in SUBGROUP_KEYWORDS.items()}
-
-def classify_group_subgroup(name: str) -> Tuple[str, str]:
-    toks = set(tokenize(name))
-    grp = next((g for g, ks in BROAD_TOKENS.items() if toks & ks), "")
-    sub = next((s for s, ks in SUB_TOKENS.items() if toks & ks), "")
-    return grp, sub
-
-# ─────────────── 2.1. Clasificación “fresco” ───────────────
+# Exclusiones/penalizaciones para determinar frescos vs procesados
 EXCLUSIONES_GENERALES_RE = re.compile(
     r"\b(extracto|jugo|sabor|pulpa|pure|salsa|lata|en\s+conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|mermelada|chips|snack|polvo|humo)\b"
 )
@@ -87,13 +145,14 @@ BANANA_EXC_RE    = re.compile(r"(harina|polvo|chips|frita|dulce|mermelada|batido
 CITRICOS_EXC_RE  = re.compile(r"(jugo|mermelada|concentrad[oa]|esencia|sabor|pulpa|congelad[oa]|deshidratad[oa]|dulce|jarabe)")
 
 def clasifica_producto(descripcion: str) -> str:
+    """Refinador: etiqueta 'fresco' cuando corresponde; mantiene categorías finas (morrón rojo, cítrico, etc.)."""
     d = normalize_text(descripcion)
     if not d:
         return ""
     if "tomate" in d and not TOMATE_EXC_RE.search(d):
         return "Tomate fresco"
-    tiene_morron = any(k in d for k in ("morron","locote","pimiento","pimenton"))
-    if tiene_morron and "rojo" in d and not re.search(r"(salsa|mole|pasta|conserva|encurtido|en\s+vinagre|en\s+lata|molid[oa]|deshidratad[oa]|congelad[oa]|pulpa|pate)", d):
+    if any(k in d for k in ("morron","locote","pimiento","pimenton")) and "rojo" in d \
+       and not re.search(r"(salsa|mole|pasta|conserva|encurtido|en\s+vinagre|en\s+lata|molid[oa]|deshidratad[oa]|congelad[oa]|pulpa|pate)", d):
         return "Morrón rojo"
     if "cebolla" in d and not CEBOLLA_EXC_RE.search(d):
         return "Cebolla fresca"
@@ -115,37 +174,176 @@ def clasifica_producto(descripcion: str) -> str:
         return "Cítrico fresco"
     return ""
 
-# ─────────────── 2.5. Exclusiones ─────────────────
-EXCLUDE_PATTERNS = [r"\bcombo\b", r"\bpack\b", r"\bdisney\b"]
+def classify_group_subgroup(name: str) -> Tuple[str, str]:
+    """Clasificador jerárquico (grupo/subgrupo) basado en taxonomía y coincidencias regex/token."""
+    d = normalize_text(name)
+    best_g, best_s, best_score = "", "", 0
+    for g, subs in TAXONOMY.items():
+        for s, pats in subs.items():
+            score = 0
+            for p in pats:
+                # coincidencias por palabra/expresión
+                if re.search(rf"\b{re.escape(p)}\b", d):
+                    score += 3
+                elif p in d:
+                    score += 1
+            # pequeñas mejoras por combinaciones típicas
+            if g == "Lacteos" and "leche" in d:
+                score += 1
+            if g == "Huevos" and ("docena" in d or "huevo" in d):
+                score += 1
+            if score > best_score:
+                best_g, best_s, best_score = g, s, score
+    # Si nada fuerte se detectó, intentamos por tokens generales (backoff)
+    if not best_g:
+        # heurística mínima previa
+        for g, subs in TAXONOMY.items():
+            if any(any(k in d for k in pats) for pats in subs.values()):
+                best_g = g
+                break
+    return best_g, best_s
+
+# ─────────────── 2.5. Exclusiones genéricas en nombre ─────────────────
+EXCLUDE_PATTERNS = [r"\bcombo\b", r"\bpack\b\s*\b(oferta|ahorro|promo)\b", r"\bdisney\b"]
 _ex_re = re.compile("|".join(EXCLUDE_PATTERNS), re.I)
 def is_excluded(name: str) -> bool:
     return bool(_ex_re.search(name))
 
-# ─────────────── 3. Unidad ─────────────────────────────
-_unit_re = re.compile(
-    r"(?P<val>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilos?|g|gr|ml|cc|l(?:itro)?s?|lt|unid(?:ad)?s?|u|paq|stk)\b",
+# ─────────────── 3. Parsing avanzado de unidades ─────────────────────────────
+# Patrones para multipacks, fracciones, docenas, etc.
+RE_MULTIPACK = re.compile(
+    r"(?:(?P<count>\d+)\s*[x×]\s*)?(?P<size>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilo|g|gr|l|lt|litro|ml|cc)\b",
     re.I
 )
-def extract_unit(name: str) -> str:
-    m = _unit_re.search(name)
-    if not m:
-        return ""
-    val = float(m.group('val').replace(',', '.'))
-    unit = m.group('unit').lower().rstrip('s')
-    if unit in ('kg', 'kilo'):
-        val *= 1000; unit_out = 'GR'
-    elif unit in ('l', 'lt', 'litro'):
-        val *= 1000; unit_out = 'CC'
-    elif unit in ('g', 'gr'):
-        unit_out = 'GR'
-    elif unit in ('ml', 'cc'):
-        unit_out = 'CC'
-    else:
-        unit_out = unit.upper()
-    val_str = str(int(val)) if val.is_integer() else f"{val:.2f}".rstrip('0').rstrip('.')
-    return f"{val_str}{unit_out}"
+RE_FRACTION = re.compile(
+    r"(?P<num>\d+)\s*/\s*(?P<den>\d+)\s*(?P<unit>kg|kilo|l|lt|litro)\b",
+    re.I
+)
+RE_UNITS = re.compile(
+    r"(?:\b(?:x|de)\s*)?(?P<count>\d+)\s*(?P<unit>uni(?:d)?|u|paq|paquete)s?\b",
+    re.I
+)
+RE_DOCENA = re.compile(r"\b(1\/2\s+docena|media\s+docena|docena)\b", re.I)
 
-# ─────────────── 4. Precio ───────────────────────────
+def _to_float(num_str: str) -> float:
+    # Cambia separador de miles y decimales estilo ES
+    s = str(num_str).replace('.', '').replace(',', '.')
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+def _norm_unit_symbol(u: str) -> str:
+    u = u.lower()
+    if u in ("kg", "kilo"):
+        return "GR"   # base gramos
+    if u in ("g", "gr"):
+        return "GR"
+    if u in ("l", "lt", "litro"):
+        return "ML"   # base mililitros
+    if u in ("ml", "cc"):
+        return "ML"
+    if u in ("uni", "unid", "u"):
+        return "UNID"
+    if u in ("paq", "paquete"):
+        return "PAQ"
+    return u.upper()
+
+def parse_unidad_corr(nombre: str) -> Tuple[str, Optional[float], str]:
+    """
+    Devuelve (Unidad_corr, Cantidad, Unidades_Separado).
+    - Preferencia: multipack con tamaño (3x200 ml) -> 600ML
+    - Si hay fracciones (1/2 kg) -> 500GR; (1/4 kg) -> 250GR
+    - Si hay sólo unidades (12 unid / docena) -> 12UNID
+    - Si no se detecta nada -> ("", None, "")
+    """
+    d = normalize_text(nombre)
+
+    # 1) Multipack o tamaño directo
+    m = RE_MULTIPACK.search(d)
+    if m:
+        count = int(m.group('count')) if m.group('count') else 1
+        size = _to_float(m.group('size'))
+        unit_sym = _norm_unit_symbol(m.group('unit'))
+        if unit_sym == "GR":
+            total = count * (size * (1000.0 if re.search(r"\bkg|kilo\b", m.group('unit'), re.I) else 1.0))
+            total_str = str(int(round(total)))
+            return f"{total_str}GR", float(total), "GR"
+        if unit_sym == "ML":
+            total = count * (size * (1000.0 if re.search(r"\bl|lt|litro\b", m.group('unit'), re.I) else 1.0))
+            total_str = str(int(round(total)))
+            return f"{total_str}ML", float(total), "ML"
+
+    # 2) Fracciones de kg/l (1/2 kg, 1/4 kg, etc.)
+    mf = RE_FRACTION.search(d)
+    if mf:
+        num = _to_float(mf.group('num'))
+        den = _to_float(mf.group('den'))
+        unit_sym = _norm_unit_symbol(mf.group('unit'))
+        frac = (num / den) if den else 0.0
+        if unit_sym in ("GR", "ML"):
+            base = 1000.0
+            total = frac * base
+            total_str = str(int(round(total)))
+            return f"{total_str}{unit_sym}", float(total), unit_sym
+
+    # 3) Docenas y unidades
+    md = RE_DOCENA.search(d)
+    if md:
+        txt = md.group(1)
+        if "1/2" in txt or "media" in txt:
+            return "6UNID", 6.0, "UNID"
+        else:
+            return "12UNID", 12.0, "UNID"
+
+    mu = RE_UNITS.search(d)
+    if mu:
+        count = int(mu.group('count'))
+        unit_sym = _norm_unit_symbol(mu.group('unit'))
+        return f"{count}{unit_sym}", float(count), "UNID" if unit_sym in ("UNID",) else unit_sym
+
+    # 4) Como último recurso: tamaño simple sin 'x'
+    #    (p. ej., "Azúcar 500 g")
+    simple = re.search(r"(?P<size>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilo|g|gr|l|lt|litro|ml|cc)\b", d, re.I)
+    if simple:
+        size = _to_float(simple.group('size'))
+        unit_sym = _norm_unit_symbol(simple.group('unit'))
+        if unit_sym == "GR":
+            total = size * (1000.0 if re.search(r"\bkg|kilo\b", simple.group('unit'), re.I) else 1.0)
+            total_str = str(int(round(total)))
+            return f"{total_str}GR", float(total), "GR"
+        if unit_sym == "ML":
+            total = size * (1000.0 if re.search(r"\bl|lt|litro\b", simple.group('unit'), re.I) else 1.0)
+            total_str = str(int(round(total)))
+            return f"{total_str}ML", float(total), "ML"
+
+    return "", None, ""
+
+def extract_unit_basic(name: str) -> str:
+    """Compatibilidad con campo 'Unidad' anterior; usa la versión avanzada y devuelve la cadena compuesta."""
+    u, _, _sep = parse_unidad_corr(name)
+    return u
+
+def precio_comparable(precio: float, cantidad: Optional[float], unidad_sep: str) -> Optional[float]:
+    """
+    Normaliza precio:
+      - GR/ML: a precio por 1000 (kg o litro)
+      - UNID/PAQ: precio por unidad/paquete
+    """
+    try:
+        p = float(precio)
+    except Exception:
+        return None
+    if not cantidad or cantidad <= 0:
+        return None
+    u = (unidad_sep or "").upper()
+    if u in ("GR", "ML"):
+        return p * (1000.0 / cantidad)  # por kg o por litro
+    if u in ("UNID", "PAQ"):
+        return p / cantidad
+    return None
+
+# ─────────────── 4. Precio web ───────────────────────────
 _price_selectors = [
     "[data-price]","[data-price-final]","[data-price-amount]",
     "meta[itemprop='price']","span.price ins span.amount","span.price > span.amount",
@@ -155,7 +353,7 @@ def norm_price(val) -> float:
     txt = re.sub(r"[^\d,\.]", "", str(val)).replace('.', '').replace(',', '.')
     try:
         return float(txt)
-    except:
+    except Exception:
         return 0.0
 
 def _first_price(node: Tag) -> float:
@@ -204,6 +402,32 @@ class HtmlSiteScraper:
     def parse_category(self, url: str) -> List[Dict]:
         raise NotImplementedError
 
+    def _assemble_row(self, nombre: str, precio: float) -> Optional[Dict]:
+        if is_excluded(nombre):
+            return None
+        # Clasificaciones
+        grp, sub = classify_group_subgroup(nombre)
+        if not grp:
+            return None
+        clasif = clasifica_producto(nombre)
+        # Unidades
+        unidad_simple = extract_unit_basic(nombre)  # compatibilidad
+        unidad_corr, cantidad, unidades_sep = parse_unidad_corr(nombre)
+        pcomp = precio_comparable(precio, cantidad, unidades_sep)
+        return {
+            'Supermercado': self.name,
+            'Producto':     nombre.upper(),
+            'Precio':       precio,
+            'Unidad':       unidad_simple,
+            'Unidad_corr':  unidad_corr,
+            'Cantidad':     cantidad if cantidad is not None else "",
+            'Unidades_Separado': unidades_sep,
+            'Precio_comparable': pcomp if pcomp is not None else "",
+            'Grupo':        grp,
+            'Subgrupo':     sub,
+            'ClasificaProducto': clasif
+        }
+
     def scrape(self) -> List[Dict]:
         ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         rows: List[Dict] = []
@@ -214,19 +438,9 @@ class HtmlSiteScraper:
             for fut in as_completed([pool.submit(self.parse_category, u) for u in urls]):
                 try:
                     for r in fut.result():
-                        if r.get("Precio", 0) <= 0:
-                            continue
-                        r["FechaConsulta"] = ts
-                        rows.append({
-                            'Supermercado': r['Supermercado'],
-                            'Producto':      r['Producto'],
-                            'Precio':        r['Precio'],
-                            'Unidad':        r['Unidad'],
-                            'Grupo':         r['Grupo'],
-                            'Subgrupo':      r['Subgrupo'],
-                            'ClasificaProducto': r.get('ClasificaProducto', ''),
-                            'FechaConsulta': r['FechaConsulta'],
-                        })
+                        if r and float(r.get("Precio", 0)) > 0:
+                            r["FechaConsulta"] = ts
+                            rows.append(r)
                 except Exception:
                     pass
         return rows
@@ -244,7 +458,9 @@ class StockScraper(HtmlSiteScraper):
             )
         except Exception:
             return []
-        kws = [t for lst in BROAD_GROUP_KEYWORDS.values() for t in lst]
+        kws = [t for lst in TAXONOMY["Verduras"].values() for t in lst] + \
+              [t for lst in TAXONOMY["Frutas"].values() for t in lst] + \
+              ["leche","yogur","queso","huevo","harina","arroz","aceite","azucar","agua","gaseosa","jugo"]
         return [
             urljoin(self.base_url, a['href'])
             for a in soup.select('a[href*="/category/"]')
@@ -263,24 +479,11 @@ class StockScraper(HtmlSiteScraper):
             el = card.select_one('h2.product-title')
             if not el:
                 continue
-            nm = el.get_text(' ', strip=True)
-            if is_excluded(nm):
-                continue
-            price = _first_price(card)
-            grp, sub = classify_group_subgroup(nm)
-            if not grp:
-                continue
-            unit = extract_unit(nm)
-            cp = clasifica_producto(nm)
-            out.append({
-                'Supermercado': 'stock',
-                'Producto':     nm.upper(),
-                'Precio':       price,
-                'Unidad':       unit,
-                'Grupo':        grp,
-                'Subgrupo':     sub,
-                'ClasificaProducto': cp
-            })
+            nombre = el.get_text(' ', strip=True)
+            precio = _first_price(card)
+            row = self._assemble_row(nombre, precio)
+            if row:
+                out.append(row)
         return out
 
 class SuperseisScraper(HtmlSiteScraper):
@@ -310,27 +513,12 @@ class SuperseisScraper(HtmlSiteScraper):
         soup = BeautifulSoup(r.content, "html.parser")
         for a in soup.find_all("a", class_="product-title-link"):
             nombre = a.get_text(strip=True)
-            if is_excluded(nombre):
-                continue
             cont = a.find_parent("div", class_="product-item")
             tag = (cont and cont.find("span", class_="price-label")) or a.find_next("span", class_="price-label")
             precio = norm_price(tag.get_text()) if tag else 0.0
-            if precio <= 0:
-                continue
-            grp, sub = classify_group_subgroup(nombre)
-            if not grp:
-                continue
-            unidad = extract_unit(nombre)
-            cp = clasifica_producto(nombre)
-            regs.append({
-                "Supermercado":   self.name,
-                "Producto":       nombre.upper(),
-                "Precio":         precio,
-                "Unidad":         unidad,
-                "Grupo":          grp,
-                "Subgrupo":       sub,
-                "ClasificaProducto": cp
-            })
+            row = self._assemble_row(nombre, precio)
+            if row:
+                regs.append(row)
         return regs
 
 class SalemmaScraper(HtmlSiteScraper):
@@ -346,7 +534,8 @@ class SalemmaScraper(HtmlSiteScraper):
             return []
         for a in BeautifulSoup(resp.content, 'html.parser').find_all('a', href=True):
             h = a['href'].lower()
-            if any(tok in h for lst in BROAD_GROUP_KEYWORDS.values() for tok in lst):
+            # heurística: incluir enlaces con palabras clave amplias
+            if any(tok in h for tok in ("fruta","verdura","lacte","queso","yogur","leche","huevo","arroz","harina","aceite","azucar","bebida","gaseosa","jugo","agua")):
                 urls.add(urljoin(self.base_url, h))
         return list(urls)
 
@@ -362,24 +551,12 @@ class SalemmaScraper(HtmlSiteScraper):
             inp_name = f.find('input', {'name': 'name'})
             if not inp_name:
                 continue
-            nm = inp_name.get('value', '')
-            if is_excluded(nm):
-                continue
-            price = norm_price((f.find('input', {'name': 'price'}) or {}).get('value', ''))
-            grp, sub = classify_group_subgroup(nm)
-            if not grp:
-                continue
-            unit = extract_unit(nm)
-            cp = clasifica_producto(nm)
-            out.append({
-                'Supermercado': 'salemma',
-                'Producto':     nm.upper(),
-                'Precio':       price,
-                'Unidad':       unit,
-                'Grupo':        grp,
-                'Subgrupo':     sub,
-                'ClasificaProducto': cp
-            })
+            nombre = inp_name.get('value', '')
+            price_input = f.find('input', {'name': 'price'})
+            precio = norm_price(price_input.get('value', '')) if price_input else 0.0
+            row = self._assemble_row(nombre, precio)
+            if row:
+                out.append(row)
         return out
 
 class AreteScraper(HtmlSiteScraper):
@@ -397,7 +574,7 @@ class AreteScraper(HtmlSiteScraper):
         for sel in ('#departments-menu', '#menu-departments-menu-1'):
             for a in soup.select(f'{sel} a[href^="catalogo/"]'):
                 h = a['href'].split('?')[0].lower()
-                if any(tok in h for lst in BROAD_GROUP_KEYWORDS.values() for tok in lst):
+                if any(tok in h for tok in ("fruta","verdura","lacte","queso","yogur","leche","huevo","arroz","harina","aceite","azucar","bebida","jugo","agua","gaseosa")):
                     urls.add(urljoin(self.base_url + '/', h))
         return list(urls)
 
@@ -413,24 +590,11 @@ class AreteScraper(HtmlSiteScraper):
             el = card.select_one('h2.ecommercepro-loop-product__title')
             if not el:
                 continue
-            nm = el.get_text(' ', strip=True)
-            if is_excluded(nm):
-                continue
-            price = _first_price(card)
-            grp, sub = classify_group_subgroup(nm)
-            if not grp:
-                continue
-            unit = extract_unit(nm)
-            cp = clasifica_producto(nm)
-            out.append({
-                'Supermercado': 'arete',
-                'Producto':     nm.upper(),
-                'Precio':       price,
-                'Unidad':       unit,
-                'Grupo':        grp,
-                'Subgrupo':     sub,
-                'ClasificaProducto': cp
-            })
+            nombre = el.get_text(' ', strip=True)
+            precio = _first_price(card)
+            row = self._assemble_row(nombre, precio)
+            if row:
+                out.append(row)
         return out
 
 class JardinesScraper(AreteScraper):
@@ -461,21 +625,26 @@ class BiggieScraper:
             except Exception:
                 break
             for it in js.get('items', []):
-                nm = it.get('name', '')
-                price = norm_price(it.get('price', 0))
-                if price <= 0:
-                    continue
-                g, sub = classify_group_subgroup(nm)
-                unit = extract_unit(nm)
-                cp = clasifica_producto(nm)
+                nombre = it.get('name', '')
+                precio = norm_price(it.get('price', 0))
+                # ensamblado coherente con HtmlSiteScraper
+                grp_det, sub = classify_group_subgroup(nombre)
+                clasif = clasifica_producto(nombre)
+                unidad_simple = extract_unit_basic(nombre)
+                unidad_corr, cantidad, unidades_sep = parse_unidad_corr(nombre)
+                pcomp = precio_comparable(precio, cantidad, unidades_sep)
                 out.append({
                     'Supermercado': 'biggie',
-                    'Producto':     nm.upper(),
-                    'Precio':       price,
-                    'Unidad':       unit,
-                    'Grupo':        g or grp.capitalize(),
+                    'Producto':     nombre.upper(),
+                    'Precio':       precio,
+                    'Unidad':       unidad_simple,
+                    'Unidad_corr':  unidad_corr,
+                    'Cantidad':     cantidad if cantidad is not None else "",
+                    'Unidades_Separado': unidades_sep,
+                    'Precio_comparable': pcomp if pcomp is not None else "",
+                    'Grupo':        grp_det or grp.capitalize(),
                     'Subgrupo':     sub,
-                    'ClasificaProducto': cp
+                    'ClasificaProducto': clasif
                 })
             skip += self.TAKE
             if skip >= js.get('count', 0):
@@ -530,7 +699,6 @@ def _ensure_required_columns(ws) -> List[str]:
     missing = [c for c in REQUIRED_COLUMNS if c not in header]
     if missing:
         new_header = header + missing
-        # ajustar columnas si faltan
         if ws.col_count < len(new_header):
             try:
                 ws.add_cols(len(new_header) - ws.col_count)
@@ -544,30 +712,25 @@ def _align_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
     out = df.copy()
     for c in columns:
         if c not in out.columns:
-            out[c] = "" if c != "Precio" else pd.NA
+            out[c] = "" if c not in ("Precio","Cantidad","Precio_comparable") else pd.NA
     return out[columns]
 
 def _get_existing_df(ws) -> pd.DataFrame:
-    # lectura segura de toda la hoja (hojas mensuales deben ser pequeñas)
     df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
     return df if not df.empty else pd.DataFrame(columns=ws.row_values(1))
 
 def _append_rows(ws, df: pd.DataFrame):
-    # Convierte NaN a "" y fechas a texto
     if "FechaConsulta" in df.columns:
         df["FechaConsulta"] = pd.to_datetime(df["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
     values = df.where(pd.notnull(df), "").values.tolist()
-    # Append en lotes para ser prudentes con el tamaño de request
     chunk = 5000
     for i in range(0, len(values), chunk):
         ws.append_rows(values[i:i+chunk], value_input_option="USER_ENTERED")
 
 def _shrink_grid(ws, nrows: int, ncols: int):
-    # Compacta la grilla para no acumular celdas vacías (reduce el total de celdas del workbook)
     try:
         ws.resize(rows=max(1, nrows), cols=max(1, ncols))
     except Exception:
-        # si falla (permisos/otros), simplemente continuar
         pass
 
 def main() -> None:
@@ -579,7 +742,6 @@ def main() -> None:
             if rows:
                 all_rows.extend(rows)
         except Exception:
-            # tolerante a fallos por sitio
             pass
 
     if not all_rows:
@@ -587,14 +749,16 @@ def main() -> None:
 
     # 2) Consolidado y tipos
     df_all = pd.DataFrame(all_rows)
-    # normalizar tipos
-    df_all["Precio"] = pd.to_numeric(df_all["Precio"], errors="coerce")
+
+    # Tipificación fuerte
+    for col in ("Precio","Cantidad","Precio_comparable"):
+        if col in df_all.columns:
+            df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
     df_all = df_all[df_all["Precio"] > 0]
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
     df_all = df_all.drop_duplicates(subset=KEY_COLS, keep="last")
 
     # 3) Determinar partición mensual
-    # En una corrida normal todos comparten el mismo mes
     if df_all["FechaConsulta"].notna().any():
         part = df_all["FechaConsulta"].dt.strftime("%Y%m").iloc[0]
     else:
@@ -625,7 +789,6 @@ def main() -> None:
     mask_new = ~all_keys.isin(prev_keys)
     new_rows = df_all.loc[mask_new].copy()
     if new_rows.empty:
-        # compactar (opcional) por si la hoja quedó grande
         _shrink_grid(ws, nrows=len(prev_df)+1, ncols=len(header))
         return
 
@@ -634,7 +797,7 @@ def main() -> None:
     new_rows = new_rows[cols_to_write]
     _append_rows(ws, new_rows)
 
-    # 8) Compactar grilla para contener exactamente datos + encabezado
+    # 8) Compactar grilla
     total_rows = 1 + len(prev_df) + len(new_rows)
     _shrink_grid(ws, nrows=total_rows, ncols=len(header))
 
