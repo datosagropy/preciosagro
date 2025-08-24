@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import unicodedata
@@ -13,19 +14,19 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import gspread
-from gspread_dataframe import set_with_dataframe, get_as_dataframe
+from gspread_dataframe import get_as_dataframe  # solo leer, no escribir
 from google.oauth2.service_account import Credentials
 
 # ─────────────────── 0. Configuración ────────────────────
 BASE_DIR        = os.environ.get("BASE_DIR", os.getcwd())
-OUT_DIR         = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))  # no se usa, pero se mantiene por compatibilidad
+OUT_DIR         = os.environ.get("OUT_DIR", os.path.join(BASE_DIR, "out"))  # reservado
 SPREADSHEET_URL = os.environ.get("SPREADSHEET_URL")
 CREDS_JSON      = os.environ.get("CREDS_JSON_PATH", os.path.abspath("creds.json"))
 WORKSHEET_NAME  = os.environ.get("WORKSHEET_NAME", "precios_supermercados")
 MAX_WORKERS     = 8
-REQ_TIMEOUT     = 20  # segundos de timeout por request
+REQ_TIMEOUT     = 20  # segundos
 
-# Esquema base requerido (sin columna ID; no se forzará su creación)
+# Esquema base requerido
 REQUIRED_COLUMNS = [
     'Supermercado','Producto','Precio','Unidad',
     'Grupo','Subgrupo','ClasificaProducto','FechaConsulta'
@@ -71,8 +72,7 @@ def classify_group_subgroup(name: str) -> Tuple[str, str]:
     sub = next((s for s, ks in SUB_TOKENS.items() if toks & ks), "")
     return grp, sub
 
-# ─────────────── 2.1. Clasificación “fresco” (ClasificaProducto) ───────────────
-import re
+# ─────────────── 2.1. Clasificación “fresco” ───────────────
 EXCLUSIONES_GENERALES_RE = re.compile(
     r"\b(extracto|jugo|sabor|pulpa|pure|salsa|lata|en\s+conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|mermelada|chips|snack|polvo|humo)\b"
 )
@@ -115,13 +115,13 @@ def clasifica_producto(descripcion: str) -> str:
         return "Cítrico fresco"
     return ""
 
-# ─────────────── 2.5. Filtro de exclusión opcional ─────────────────
+# ─────────────── 2.5. Exclusiones ─────────────────
 EXCLUDE_PATTERNS = [r"\bcombo\b", r"\bpack\b", r"\bdisney\b"]
 _ex_re = re.compile("|".join(EXCLUDE_PATTERNS), re.I)
 def is_excluded(name: str) -> bool:
     return bool(_ex_re.search(name))
 
-# ─────────────── 3. Extracción de unidad ─────────────────────────────
+# ─────────────── 3. Unidad ─────────────────────────────
 _unit_re = re.compile(
     r"(?P<val>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilos?|g|gr|ml|cc|l(?:itro)?s?|lt|unid(?:ad)?s?|u|paq|stk)\b",
     re.I
@@ -145,7 +145,7 @@ def extract_unit(name: str) -> str:
     val_str = str(int(val)) if val.is_integer() else f"{val:.2f}".rstrip('0').rstrip('.')
     return f"{val_str}{unit_out}"
 
-# ─────────────── 4. Normalización de precio ───────────────────────────
+# ─────────────── 4. Precio ───────────────────────────
 _price_selectors = [
     "[data-price]","[data-price-final]","[data-price-amount]",
     "meta[itemprop='price']","span.price ins span.amount","span.price > span.amount",
@@ -173,7 +173,7 @@ def _first_price(node: Tag) -> float:
                 return p
     return 0.0
 
-# ─────────────── 5. HTTP session robusta ───────────────────────────
+# ─────────────── 5. HTTP session ───────────────────────────
 def _build_session() -> requests.Session:
     retry = Retry(
         total=4,
@@ -191,7 +191,7 @@ def _build_session() -> requests.Session:
     s.mount("https://", adapter)
     return s
 
-# ─────────────── 6. Clase base scraper ───────────────────────────────
+# ─────────────── 6. Clase base ───────────────────────────────
 class HtmlSiteScraper:
     def __init__(self, name: str, base: str):
         self.name = name
@@ -501,8 +501,8 @@ SCRAPERS = {
     'biggie':      BiggieScraper,
 }
 
-# ─────────────── 13. Google Sheets (sin borrar datos) ─────────────────
-def _open_sheet():
+# ─────────────── 13. Google Sheets (partición mensual, sin resize masivo) ─────────────────
+def _authorize_sheet():
     scopes = [
         'https://www.googleapis.com/auth/drive',
         'https://www.googleapis.com/auth/spreadsheets',
@@ -510,105 +510,133 @@ def _open_sheet():
     cred = Credentials.from_service_account_file(CREDS_JSON, scopes=scopes)
     gc   = gspread.authorize(cred)
     sh   = gc.open_by_url(SPREADSHEET_URL)
+    return sh
 
+def _ensure_worksheet(sh, title: str):
     try:
-        ws = sh.worksheet(WORKSHEET_NAME)
-        df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
+        ws = sh.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
-        # Si no existe, se crea con encabezado requerido
-        ws = sh.add_worksheet(title=WORKSHEET_NAME, rows='10000', cols='60')
-        # Escribimos sólo la fila de encabezado (no borra nada porque es hoja nueva)
+        ws = sh.add_worksheet(title=title, rows='2', cols=str(len(REQUIRED_COLUMNS)))
         ws.update('A1', [REQUIRED_COLUMNS])
-        df = pd.DataFrame(columns=REQUIRED_COLUMNS)
-    return ws, df
+    return ws
 
 def _ensure_required_columns(ws) -> List[str]:
-    """Garantiza que el encabezado contenga al menos las columnas REQUIRED_COLUMNS.
-       Si faltan, las agrega al final sin borrar datos.
-       Devuelve la lista de columnas del encabezado final.
-    """
     header = ws.row_values(1)
-    header = [h for h in header if h]  # limpiar vacíos al final, si hay
+    header = [h for h in header if h]
     if not header:
         header = REQUIRED_COLUMNS.copy()
         ws.update('A1', [header])
         return header
-
     missing = [c for c in REQUIRED_COLUMNS if c not in header]
-    if not missing:
-        return header
-
-    new_header = header + missing
-    # Asegurar cantidad de columnas físicas
-    if ws.col_count < len(new_header):
-        ws.add_cols(len(new_header) - ws.col_count)
-    # Actualizar SOLO la fila 1 completa con el nuevo encabezado (no toca datos)
-    ws.update('A1', [new_header])
-    return new_header
+    if missing:
+        new_header = header + missing
+        # ajustar columnas si faltan
+        if ws.col_count < len(new_header):
+            try:
+                ws.add_cols(len(new_header) - ws.col_count)
+            except Exception:
+                pass
+        ws.update('A1', [new_header])
+        return new_header
+    return header
 
 def _align_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    """Alinea el DF a un conjunto de columnas (agrega faltantes vacías y reordena)."""
     out = df.copy()
     for c in columns:
         if c not in out.columns:
             out[c] = "" if c != "Precio" else pd.NA
     return out[columns]
 
+def _get_existing_df(ws) -> pd.DataFrame:
+    # lectura segura de toda la hoja (hojas mensuales deben ser pequeñas)
+    df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
+    return df if not df.empty else pd.DataFrame(columns=ws.row_values(1))
+
+def _append_rows(ws, df: pd.DataFrame):
+    # Convierte NaN a "" y fechas a texto
+    if "FechaConsulta" in df.columns:
+        df["FechaConsulta"] = pd.to_datetime(df["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    values = df.where(pd.notnull(df), "").values.tolist()
+    # Append en lotes para ser prudentes con el tamaño de request
+    chunk = 5000
+    for i in range(0, len(values), chunk):
+        ws.append_rows(values[i:i+chunk], value_input_option="USER_ENTERED")
+
+def _shrink_grid(ws, nrows: int, ncols: int):
+    # Compacta la grilla para no acumular celdas vacías (reduce el total de celdas del workbook)
+    try:
+        ws.resize(rows=max(1, nrows), cols=max(1, ncols))
+    except Exception:
+        # si falla (permisos/otros), simplemente continuar
+        pass
+
 def main() -> None:
     # 1) Ejecutar scrapers y recolectar
     all_rows: List[Dict] = []
-    for name, cls in SCRAPERS.items():
-        inst = cls()
-        rows = inst.scrape()
-        if rows:
-            all_rows.extend(rows)
+    for _, cls in SCRAPERS.items():
+        try:
+            rows = cls().scrape()
+            if rows:
+                all_rows.extend(rows)
+        except Exception:
+            # tolerante a fallos por sitio
+            pass
 
     if not all_rows:
         return
 
     # 2) Consolidado y tipos
     df_all = pd.DataFrame(all_rows)
+    # normalizar tipos
+    df_all["Precio"] = pd.to_numeric(df_all["Precio"], errors="coerce")
+    df_all = df_all[df_all["Precio"] > 0]
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
+    df_all = df_all.drop_duplicates(subset=KEY_COLS, keep="last")
 
-    # 3) Abrir hoja, asegurar encabezado, y leer DF previo
-    ws, prev_df = _open_sheet()
-    header = _ensure_required_columns(ws)  # no borra datos; añade columnas faltantes
-    # Releer prev_df si estaba vacío pero ahora hay nuevas columnas? No necesario; lo alineamos:
+    # 3) Determinar partición mensual
+    # En una corrida normal todos comparten el mismo mes
+    if df_all["FechaConsulta"].notna().any():
+        part = df_all["FechaConsulta"].dt.strftime("%Y%m").iloc[0]
+    else:
+        part = datetime.now(timezone.utc).strftime("%Y%m")
+    target_title = f"{WORKSHEET_NAME}_{part}"
+
+    # 4) Abrir workbook y hoja mensual
+    sh = _authorize_sheet()
+    ws = _ensure_worksheet(sh, target_title)
+    header = _ensure_required_columns(ws)
+
+    # 5) Leer existente y alinear
+    prev_df = _get_existing_df(ws)
     if prev_df.empty:
         prev_df = pd.DataFrame(columns=header)
     prev_df = _align_df_columns(prev_df, header)
-    # Alinear df_all a REQUIRED_COLUMNS, y luego reordenarlo según header para escribir
-    df_all = _align_df_columns(df_all, REQUIRED_COLUMNS)
+    df_all  = _align_df_columns(df_all, header)
 
-    # 4) Detección de filas nuevas por KEY_COLS
-    #    Asegurar que prev_df tenga KEY_COLS (si encabezado previo no los tenía, ya se agregaron vacíos)
+    # 6) Detección de nuevas filas por clave
     for c in KEY_COLS:
         if c not in prev_df.columns:
             prev_df[c] = ""
-    idx_prev = prev_df.set_index(KEY_COLS).index if not prev_df.empty else pd.Index([])
-    idx_all  = df_all.set_index(KEY_COLS).index
-    new_idx  = idx_all.difference(idx_prev)
-    if new_idx.empty:
+    if not prev_df.empty:
+        prev_keys = set(prev_df[KEY_COLS].astype(str).agg('|'.join, axis=1))
+    else:
+        prev_keys = set()
+    all_keys = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
+    mask_new = ~all_keys.isin(prev_keys)
+    new_rows = df_all.loc[mask_new].copy()
+    if new_rows.empty:
+        # compactar (opcional) por si la hoja quedó grande
+        _shrink_grid(ws, nrows=len(prev_df)+1, ncols=len(header))
         return
 
-    # 5) Preparar filas nuevas y ordenarlas según encabezado actual
-    new_rows = df_all.set_index(KEY_COLS).loc[new_idx].reset_index()
-    # Orden de columnas a escribir = orden del encabezado
+    # 7) Ordenar columnas según encabezado y anexar
     cols_to_write = [c for c in header if c in new_rows.columns]
     new_rows = new_rows[cols_to_write]
-    # Formato de FechaConsulta como texto
-    if "FechaConsulta" in new_rows.columns:
-        new_rows["FechaConsulta"] = pd.to_datetime(new_rows["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    _append_rows(ws, new_rows)
 
-    # 6) Append sin borrar la hoja
-    start_row = (len(prev_df) + 2)  # primera fila libre (considerando encabezado)
-    set_with_dataframe(
-        ws,
-        new_rows,
-        row=start_row,
-        include_index=False,
-        include_column_header=False
-    )
+    # 8) Compactar grilla para contener exactamente datos + encabezado
+    total_rows = 1 + len(prev_df) + len(new_rows)
+    _shrink_grid(ws, nrows=total_rows, ncols=len(header))
 
 if __name__ == "__main__":
     main()
