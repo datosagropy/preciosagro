@@ -8,7 +8,8 @@ from typing import List, Dict, Tuple, Optional, Any
 from urllib.parse import urljoin
 import time
 import logging
-
+from typing import Tuple, Optional
+import gspread
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup, Tag
