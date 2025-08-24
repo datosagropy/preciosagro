@@ -29,8 +29,8 @@ REQ_TIMEOUT     = 20  # segundos
 # Esquema base requerido (añadimos campos nuevos solicitados)
 REQUIRED_COLUMNS = [
     'Supermercado','Producto','Precio',
-    'Unidad',              # extracción simple (compatibilidad)
-    'Unidad_corr','Cantidad','Unidades_Separado','Precio_comparable',  # NUEVOS
+    'Unidad',
+    'Unidad_corr','Cantidad','Unidades_Separado','Precio_comparable',
     'Grupo','Subgrupo','ClasificaProducto',
     'FechaConsulta'
 ]
@@ -48,8 +48,7 @@ def tokenize(txt: str) -> List[str]:
     import re as _re
     return [strip_accents(t.lower()) for t in _re.findall(r"[a-záéíóúñü]+", str(txt), flags=_re.I)]
 
-# ─────────────── 2. Clasificación Grupo/Subgrupo ─────────────────
-# Taxonomía ampliada (radicalmente mejorada); patrones en minúsculas/acento removido.
+# ─────────────── 2. Clasificación (mejorada) ─────────────────
 TAXONOMY: Dict[str, Dict[str, List[str]]] = {
     "Verduras": {
         "Tomate": ["tomate", "perita", "cherry"],
@@ -130,22 +129,18 @@ TAXONOMY: Dict[str, Dict[str, List[str]]] = {
     },
 }
 
-# Exclusiones/penalizaciones para determinar frescos vs procesados
 EXCLUSIONES_GENERALES_RE = re.compile(
     r"\b(extracto|jugo|sabor|pulpa|pure|salsa|lata|en\s+conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|mermelada|chips|snack|polvo|humo)\b"
 )
-TOMATE_EXC_RE = re.compile(
-    r"(arroz\s+con\s+tomate|en\s+tomate|salsa(\s+de)?\s+tomate|ketchup|tomate\s+en\s+polvo|tomate\s+en\s+lata|extracto|jugo|pulpa|pure|congelad[oa]|deshidratad[oa])"
-)
-CEBOLLA_EXC_RE = re.compile(r"(en\s+polvo|salsa|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|crema|sopa)")
-PAPA_EXC_RE    = re.compile(r"(chips|frita|fritas|chuño|pure|congelad[oa]|deshidratad[oa]|harina|sopa|snack)")
-ZANAHORIA_EXC_RE = re.compile(r"(jugo|pure|conserva|congelad[oa]|deshidratad[oa]|salsa|tarta|pastel|mermelada)")
-REMOLACHA_EXC_RE = re.compile(r"(en\s+lata|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|jugo|pulpa|mermelada)")
-BANANA_EXC_RE    = re.compile(r"(harina|polvo|chips|frita|dulce|mermelada|batido|jugo|snack|pure|congelad[oa]|deshidratad[oa])")
-CITRICOS_EXC_RE  = re.compile(r"(jugo|mermelada|concentrad[oa]|esencia|sabor|pulpa|congelad[oa]|deshidratad[oa]|dulce|jarabe)")
+TOMATE_EXC_RE   = re.compile(r"(arroz\s+con\s+tomate|en\s+tomate|salsa(\s+de)?\s+tomate|ketchup|tomate\s+en\s+polvo|tomate\s+en\s+lata|extracto|jugo|pulpa|pure|congelad[oa]|deshidratad[oa])")
+CEBOLLA_EXC_RE  = re.compile(r"(en\s+polvo|salsa|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|pate|crema|sopa)")
+PAPA_EXC_RE     = re.compile(r"(chips|frita|fritas|chuño|pure|congelad[oa]|deshidratad[oa]|harina|sopa|snack)")
+ZANAHORIA_EXC_RE= re.compile(r"(jugo|pure|conserva|congelad[oa]|deshidratad[oa]|salsa|tarta|pastel|mermelada)")
+REMOLACHA_EXC_RE= re.compile(r"(en\s+lata|conserva|encurtid[oa]|congelad[oa]|deshidratad[oa]|jugo|pulpa|mermelada)")
+BANANA_EXC_RE   = re.compile(r"(harina|polvo|chips|frita|dulce|mermelada|batido|jugo|snack|pure|congelad[oa]|deshidratad[oa])")
+CITRICOS_EXC_RE = re.compile(r"(jugo|mermelada|concentrad[oa]|esencia|sabor|pulpa|congelad[oa]|deshidratad[oa]|dulce|jarabe)")
 
 def clasifica_producto(descripcion: str) -> str:
-    """Refinador: etiqueta 'fresco' cuando corresponde; mantiene categorías finas (morrón rojo, cítrico, etc.)."""
     d = normalize_text(descripcion)
     if not d:
         return ""
@@ -175,119 +170,84 @@ def clasifica_producto(descripcion: str) -> str:
     return ""
 
 def classify_group_subgroup(name: str) -> Tuple[str, str]:
-    """Clasificador jerárquico (grupo/subgrupo) basado en taxonomía y coincidencias regex/token."""
     d = normalize_text(name)
     best_g, best_s, best_score = "", "", 0
     for g, subs in TAXONOMY.items():
         for s, pats in subs.items():
             score = 0
             for p in pats:
-                # coincidencias por palabra/expresión
                 if re.search(rf"\b{re.escape(p)}\b", d):
                     score += 3
                 elif p in d:
                     score += 1
-            # pequeñas mejoras por combinaciones típicas
             if g == "Lacteos" and "leche" in d:
                 score += 1
             if g == "Huevos" and ("docena" in d or "huevo" in d):
                 score += 1
             if score > best_score:
                 best_g, best_s, best_score = g, s, score
-    # Si nada fuerte se detectó, intentamos por tokens generales (backoff)
     if not best_g:
-        # heurística mínima previa
         for g, subs in TAXONOMY.items():
             if any(any(k in d for k in pats) for pats in subs.values()):
                 best_g = g
                 break
     return best_g, best_s
 
-# ─────────────── 2.5. Exclusiones genéricas en nombre ─────────────────
+# ─────────────── 2.5. Exclusiones en nombre ─────────────────
 EXCLUDE_PATTERNS = [r"\bcombo\b", r"\bpack\b\s*\b(oferta|ahorro|promo)\b", r"\bdisney\b"]
 _ex_re = re.compile("|".join(EXCLUDE_PATTERNS), re.I)
 def is_excluded(name: str) -> bool:
     return bool(_ex_re.search(name))
 
-# ─────────────── 3. Parsing avanzado de unidades ─────────────────────────────
-# Patrones para multipacks, fracciones, docenas, etc.
+# ─────────────── 3. Unidades avanzadas ─────────────────────────────
 RE_MULTIPACK = re.compile(
     r"(?:(?P<count>\d+)\s*[x×]\s*)?(?P<size>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilo|g|gr|l|lt|litro|ml|cc)\b",
     re.I
 )
-RE_FRACTION = re.compile(
-    r"(?P<num>\d+)\s*/\s*(?P<den>\d+)\s*(?P<unit>kg|kilo|l|lt|litro)\b",
-    re.I
-)
-RE_UNITS = re.compile(
-    r"(?:\b(?:x|de)\s*)?(?P<count>\d+)\s*(?P<unit>uni(?:d)?|u|paq|paquete)s?\b",
-    re.I
-)
-RE_DOCENA = re.compile(r"\b(1\/2\s+docena|media\s+docena|docena)\b", re.I)
+RE_FRACTION = re.compile(r"(?P<num>\d+)\s*/\s*(?P<den>\d+)\s*(?P<unit>kg|kilo|l|lt|litro)\b", re.I)
+RE_UNITS    = re.compile(r"(?:\b(?:x|de)\s*)?(?P<count>\d+)\s*(?P<unit>uni(?:d)?|u|paq|paquete)s?\b", re.I)
+RE_DOCENA   = re.compile(r"\b(1\/2\s+docena|media\s+docena|docena)\b", re.I)
 
 def _to_float(num_str: str) -> float:
-    # Cambia separador de miles y decimales estilo ES
     s = str(num_str).replace('.', '').replace(',', '.')
-    try:
-        return float(s)
-    except Exception:
-        return 0.0
+    try: return float(s)
+    except Exception: return 0.0
 
 def _norm_unit_symbol(u: str) -> str:
     u = u.lower()
-    if u in ("kg", "kilo"):
-        return "GR"   # base gramos
-    if u in ("g", "gr"):
-        return "GR"
-    if u in ("l", "lt", "litro"):
-        return "ML"   # base mililitros
-    if u in ("ml", "cc"):
-        return "ML"
-    if u in ("uni", "unid", "u"):
-        return "UNID"
-    if u in ("paq", "paquete"):
-        return "PAQ"
+    if u in ("kg","kilo"): return "GR"
+    if u in ("g","gr"):    return "GR"
+    if u in ("l","lt","litro"): return "ML"
+    if u in ("ml","cc"):   return "ML"
+    if u in ("uni","unid","u"): return "UNID"
+    if u in ("paq","paquete"):   return "PAQ"
     return u.upper()
 
 def parse_unidad_corr(nombre: str) -> Tuple[str, Optional[float], str]:
-    """
-    Devuelve (Unidad_corr, Cantidad, Unidades_Separado).
-    - Preferencia: multipack con tamaño (3x200 ml) -> 600ML
-    - Si hay fracciones (1/2 kg) -> 500GR; (1/4 kg) -> 250GR
-    - Si hay sólo unidades (12 unid / docena) -> 12UNID
-    - Si no se detecta nada -> ("", None, "")
-    """
     d = normalize_text(nombre)
 
-    # 1) Multipack o tamaño directo
     m = RE_MULTIPACK.search(d)
     if m:
         count = int(m.group('count')) if m.group('count') else 1
-        size = _to_float(m.group('size'))
+        size  = _to_float(m.group('size'))
         unit_sym = _norm_unit_symbol(m.group('unit'))
         if unit_sym == "GR":
             total = count * (size * (1000.0 if re.search(r"\bkg|kilo\b", m.group('unit'), re.I) else 1.0))
-            total_str = str(int(round(total)))
-            return f"{total_str}GR", float(total), "GR"
+            return f"{int(round(total))}GR", float(total), "GR"
         if unit_sym == "ML":
             total = count * (size * (1000.0 if re.search(r"\bl|lt|litro\b", m.group('unit'), re.I) else 1.0))
-            total_str = str(int(round(total)))
-            return f"{total_str}ML", float(total), "ML"
+            return f"{int(round(total))}ML", float(total), "ML"
 
-    # 2) Fracciones de kg/l (1/2 kg, 1/4 kg, etc.)
     mf = RE_FRACTION.search(d)
     if mf:
-        num = _to_float(mf.group('num'))
-        den = _to_float(mf.group('den'))
+        num  = _to_float(mf.group('num'))
+        den  = _to_float(mf.group('den'))
         unit_sym = _norm_unit_symbol(mf.group('unit'))
-        frac = (num / den) if den else 0.0
-        if unit_sym in ("GR", "ML"):
-            base = 1000.0
-            total = frac * base
-            total_str = str(int(round(total)))
-            return f"{total_str}{unit_sym}", float(total), unit_sym
+        frac = (num/den) if den else 0.0
+        if unit_sym in ("GR","ML"):
+            total = frac*1000.0
+            return f"{int(round(total))}{unit_sym}", float(total), unit_sym
 
-    # 3) Docenas y unidades
     md = RE_DOCENA.search(d)
     if md:
         txt = md.group(1)
@@ -300,36 +260,26 @@ def parse_unidad_corr(nombre: str) -> Tuple[str, Optional[float], str]:
     if mu:
         count = int(mu.group('count'))
         unit_sym = _norm_unit_symbol(mu.group('unit'))
-        return f"{count}{unit_sym}", float(count), "UNID" if unit_sym in ("UNID",) else unit_sym
+        return f"{count}{unit_sym}", float(count), "UNID" if unit_sym == "UNID" else unit_sym
 
-    # 4) Como último recurso: tamaño simple sin 'x'
-    #    (p. ej., "Azúcar 500 g")
     simple = re.search(r"(?P<size>\d+(?:[.,]\d+)?)\s*(?P<unit>kg|kilo|g|gr|l|lt|litro|ml|cc)\b", d, re.I)
     if simple:
         size = _to_float(simple.group('size'))
         unit_sym = _norm_unit_symbol(simple.group('unit'))
         if unit_sym == "GR":
             total = size * (1000.0 if re.search(r"\bkg|kilo\b", simple.group('unit'), re.I) else 1.0)
-            total_str = str(int(round(total)))
-            return f"{total_str}GR", float(total), "GR"
+            return f"{int(round(total))}GR", float(total), "GR"
         if unit_sym == "ML":
             total = size * (1000.0 if re.search(r"\bl|lt|litro\b", simple.group('unit'), re.I) else 1.0)
-            total_str = str(int(round(total)))
-            return f"{total_str}ML", float(total), "ML"
+            return f"{int(round(total))}ML", float(total), "ML"
 
     return "", None, ""
 
 def extract_unit_basic(name: str) -> str:
-    """Compatibilidad con campo 'Unidad' anterior; usa la versión avanzada y devuelve la cadena compuesta."""
-    u, _, _sep = parse_unidad_corr(name)
+    u, _, _ = parse_unidad_corr(name)
     return u
 
 def precio_comparable(precio: float, cantidad: Optional[float], unidad_sep: str) -> Optional[float]:
-    """
-    Normaliza precio:
-      - GR/ML: a precio por 1000 (kg o litro)
-      - UNID/PAQ: precio por unidad/paquete
-    """
     try:
         p = float(precio)
     except Exception:
@@ -337,9 +287,9 @@ def precio_comparable(precio: float, cantidad: Optional[float], unidad_sep: str)
     if not cantidad or cantidad <= 0:
         return None
     u = (unidad_sep or "").upper()
-    if u in ("GR", "ML"):
+    if u in ("GR","ML"):
         return p * (1000.0 / cantidad)  # por kg o por litro
-    if u in ("UNID", "PAQ"):
+    if u in ("UNID","PAQ"):
         return p / cantidad
     return None
 
@@ -351,10 +301,8 @@ _price_selectors = [
 ]
 def norm_price(val) -> float:
     txt = re.sub(r"[^\d,\.]", "", str(val)).replace('.', '').replace(',', '.')
-    try:
-        return float(txt)
-    except Exception:
-        return 0.0
+    try: return float(txt)
+    except Exception: return 0.0
 
 def _first_price(node: Tag) -> float:
     for attr in ("data-price","data-price-final","data-price-amount"):
@@ -367,8 +315,7 @@ def _first_price(node: Tag) -> float:
         el = node.select_one(sel)
         if el:
             p = norm_price(el.get_text() or el.get(sel,''))
-            if p>0:
-                return p
+            if p>0: return p
     return 0.0
 
 # ─────────────── 5. HTTP session ───────────────────────────
@@ -405,13 +352,11 @@ class HtmlSiteScraper:
     def _assemble_row(self, nombre: str, precio: float) -> Optional[Dict]:
         if is_excluded(nombre):
             return None
-        # Clasificaciones
         grp, sub = classify_group_subgroup(nombre)
         if not grp:
             return None
         clasif = clasifica_producto(nombre)
-        # Unidades
-        unidad_simple = extract_unit_basic(nombre)  # compatibilidad
+        unidad_simple = extract_unit_basic(nombre)
         unidad_corr, cantidad, unidades_sep = parse_unidad_corr(nombre)
         pcomp = precio_comparable(precio, cantidad, unidades_sep)
         return {
@@ -534,7 +479,6 @@ class SalemmaScraper(HtmlSiteScraper):
             return []
         for a in BeautifulSoup(resp.content, 'html.parser').find_all('a', href=True):
             h = a['href'].lower()
-            # heurística: incluir enlaces con palabras clave amplias
             if any(tok in h for tok in ("fruta","verdura","lacte","queso","yogur","leche","huevo","arroz","harina","aceite","azucar","bebida","gaseosa","jugo","agua")):
                 urls.add(urljoin(self.base_url, h))
         return list(urls)
@@ -627,7 +571,6 @@ class BiggieScraper:
             for it in js.get('items', []):
                 nombre = it.get('name', '')
                 precio = norm_price(it.get('price', 0))
-                # ensamblado coherente con HtmlSiteScraper
                 grp_det, sub = classify_group_subgroup(nombre)
                 clasif = clasifica_producto(nombre)
                 unidad_simple = extract_unit_basic(nombre)
@@ -689,24 +632,9 @@ def _ensure_worksheet(sh, title: str):
         ws.update('A1', [REQUIRED_COLUMNS])
     return ws
 
-def _ensure_required_columns(ws) -> List[str]:
-    header = ws.row_values(1)
-    header = [h for h in header if h]
-    if not header:
-        header = REQUIRED_COLUMNS.copy()
-        ws.update('A1', [header])
-        return header
-    missing = [c for c in REQUIRED_COLUMNS if c not in header]
-    if missing:
-        new_header = header + missing
-        if ws.col_count < len(new_header):
-            try:
-                ws.add_cols(len(new_header) - ws.col_count)
-            except Exception:
-                pass
-        ws.update('A1', [new_header])
-        return new_header
-    return header
+def _get_existing_df(ws) -> pd.DataFrame:
+    df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
+    return df if not df.empty else pd.DataFrame(columns=ws.row_values(1))
 
 def _align_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
     out = df.copy()
@@ -714,10 +642,6 @@ def _align_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
         if c not in out.columns:
             out[c] = "" if c not in ("Precio","Cantidad","Precio_comparable") else pd.NA
     return out[columns]
-
-def _get_existing_df(ws) -> pd.DataFrame:
-    df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
-    return df if not df.empty else pd.DataFrame(columns=ws.row_values(1))
 
 def _append_rows(ws, df: pd.DataFrame):
     if "FechaConsulta" in df.columns:
@@ -727,11 +651,60 @@ def _append_rows(ws, df: pd.DataFrame):
     for i in range(0, len(values), chunk):
         ws.append_rows(values[i:i+chunk], value_input_option="USER_ENTERED")
 
-def _shrink_grid(ws, nrows: int, ncols: int):
+def _shrink_grid(ws, nrows: int, ncols: Optional[int] = None):
     try:
-        ws.resize(rows=max(1, nrows), cols=max(1, ncols))
+        ws.resize(rows=max(1, nrows), cols=max(1, ncols or ws.col_count))
     except Exception:
         pass
+
+def _ensure_required_columns_safe(ws, used_rows: int) -> Tuple[gspread.Worksheet, List[str]]:
+    """
+    Compacta filas ANTES de añadir columnas y luego garantiza el encabezado.
+    Devuelve (worksheet posiblemente actualizado, header final).
+    """
+    # 1) Compactar filas a lo usado para liberar celdas
+    try:
+        if ws.row_count > max(1, used_rows):
+            ws.resize(rows=max(1, used_rows), cols=ws.col_count)
+    except Exception:
+        pass
+
+    # 2) Leer encabezado actual
+    header = ws.row_values(1)
+    header = [h for h in header if h]
+
+    # 3) Si no hay encabezado, escribir el requerido (tras haber compactado filas)
+    if not header:
+        need_cols = max(ws.col_count, len(REQUIRED_COLUMNS))
+        if ws.col_count < need_cols:
+            try:
+                ws.add_cols(need_cols - ws.col_count)
+            except Exception:
+                pass
+        ws.update('A1', [REQUIRED_COLUMNS])
+        return ws, REQUIRED_COLUMNS.copy()
+
+    # 4) Agregar faltantes al final
+    missing = [c for c in REQUIRED_COLUMNS if c not in header]
+    if not missing:
+        return ws, header
+
+    new_header = header + missing
+    # Asegurar columnas necesarias después de haber reducido filas
+    if ws.col_count < len(new_header):
+        try:
+            ws.add_cols(len(new_header) - ws.col_count)
+        except gspread.exceptions.APIError:
+            # Intento de última oportunidad: reducir aún más filas (mínimo encabezado)
+            try:
+                ws.resize(rows=max(1, used_rows), cols=ws.col_count)
+                if ws.col_count < len(new_header):
+                    ws.add_cols(len(new_header) - ws.col_count)
+            except Exception:
+                pass
+    # Actualizar encabezado
+    ws.update('A1', [new_header])
+    return ws, new_header
 
 def main() -> None:
     # 1) Ejecutar scrapers y recolectar
@@ -743,14 +716,11 @@ def main() -> None:
                 all_rows.extend(rows)
         except Exception:
             pass
-
     if not all_rows:
         return
 
     # 2) Consolidado y tipos
     df_all = pd.DataFrame(all_rows)
-
-    # Tipificación fuerte
     for col in ("Precio","Cantidad","Precio_comparable"):
         if col in df_all.columns:
             df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
@@ -758,7 +728,7 @@ def main() -> None:
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
     df_all = df_all.drop_duplicates(subset=KEY_COLS, keep="last")
 
-    # 3) Determinar partición mensual
+    # 3) Partición mensual
     if df_all["FechaConsulta"].notna().any():
         part = df_all["FechaConsulta"].dt.strftime("%Y%m").iloc[0]
     else:
@@ -768,36 +738,34 @@ def main() -> None:
     # 4) Abrir workbook y hoja mensual
     sh = _authorize_sheet()
     ws = _ensure_worksheet(sh, target_title)
-    header = _ensure_required_columns(ws)
 
-    # 5) Leer existente y alinear
+    # 5) LEER primero lo existente para conocer used_rows y luego compactar+encabezado
     prev_df = _get_existing_df(ws)
+    used_rows = 1 + len(prev_df)  # encabezado + datos existentes (según valores reales)
+    ws, header = _ensure_required_columns_safe(ws, used_rows=used_rows)
+
+    # 6) Alinear dataframes a header final
     if prev_df.empty:
         prev_df = pd.DataFrame(columns=header)
     prev_df = _align_df_columns(prev_df, header)
     df_all  = _align_df_columns(df_all, header)
 
-    # 6) Detección de nuevas filas por clave
+    # 7) Detección de nuevas filas por clave
     for c in KEY_COLS:
         if c not in prev_df.columns:
             prev_df[c] = ""
-    if not prev_df.empty:
-        prev_keys = set(prev_df[KEY_COLS].astype(str).agg('|'.join, axis=1))
-    else:
-        prev_keys = set()
-    all_keys = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
-    mask_new = ~all_keys.isin(prev_keys)
-    new_rows = df_all.loc[mask_new].copy()
+    prev_keys = set(prev_df[KEY_COLS].astype(str).agg('|'.join, axis=1)) if not prev_df.empty else set()
+    all_keys  = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
+    new_rows  = df_all.loc[~all_keys.isin(prev_keys)].copy()
     if new_rows.empty:
         _shrink_grid(ws, nrows=len(prev_df)+1, ncols=len(header))
         return
 
-    # 7) Ordenar columnas según encabezado y anexar
+    # 8) Append y compactación final
     cols_to_write = [c for c in header if c in new_rows.columns]
     new_rows = new_rows[cols_to_write]
     _append_rows(ws, new_rows)
 
-    # 8) Compactar grilla
     total_rows = 1 + len(prev_df) + len(new_rows)
     _shrink_grid(ws, nrows=total_rows, ncols=len(header))
 
