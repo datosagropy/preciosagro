@@ -14,6 +14,9 @@ jobs:
       GCP_CREDENTIALS_JSON: ${{ secrets.GCP_CREDENTIALS_JSON }}
       SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
       WORKSHEET_NAME: "precios_supermercados"
+      DRIVE_FOLDER_ID: "19D35tA8O_UDhsb65fUbqIze55gKGSpBD" # opcional
+      SHARE_WITH_EMAIL: "tu_correo@dominio.com"        # opcional
+
 
     steps:
       - name: Checkout repo
