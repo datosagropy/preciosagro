@@ -799,27 +799,118 @@ def _get_existing_df(ws) -> pd.DataFrame:
         logger.error(f"Error obteniendo datos existentes: {e}")
         return pd.DataFrame()
 
-def _append_rows(ws, df: pd.DataFrame):
-    try:
-        if "FechaConsulta" in df.columns:
-            df["FechaConsulta"] = pd.to_datetime(df["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
-        
-        values = df.where(pd.notnull(df), "").values.tolist()
-        
-        # Escribir en lotes más pequeños para evitar timeouts
-        chunk_size = 1000
-        for i in range(0, len(values), chunk_size):
-            chunk = values[i:i + chunk_size]
-            ws.append_rows(chunk, value_input_option="USER_ENTERED")
-            time.sleep(1)  # Pequeña pausa para evitar rate limiting
-    except Exception as e:
-        logger.error(f"Error añadiendo filas: {e}")
 
-def _shrink_grid(ws, nrows: int, ncols: int):
+
+
+
+
+
+from typing import Tuple, Optional
+import gspread
+
+def _append_rows(ws, df: pd.DataFrame):
+    if "FechaConsulta" in df.columns:
+        df["FechaConsulta"] = pd.to_datetime(df["FechaConsulta"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    values = df.where(pd.notnull(df), "").values.tolist()
+    chunk = 5000
+    for i in range(0, len(values), chunk):
+        ws.append_rows(values[i:i+chunk], value_input_option="USER_ENTERED")
+
+def _shrink_grid(ws, nrows: int, ncols: Optional[int] = None):
+    # Nunca ampliar; sólo reducir.
     try:
-        ws.resize(rows=max(1, nrows), cols=max(1, ncols))
-    except Exception as e:
-        logger.warning(f"No se pudo ajustar el tamaño de la hoja: {e}")
+        ws.resize(rows=max(1, nrows), cols=max(1, (ncols or ws.col_count)))
+    except Exception:
+        pass
+
+def _get_existing_df(ws) -> pd.DataFrame:
+    df = get_as_dataframe(ws, dtype=str, header=0, evaluate_formulas=False).dropna(how='all')
+    return df if not df.empty else pd.DataFrame(columns=ws.row_values(1))
+
+def _ensure_required_columns_safe(ws, used_rows: int) -> Tuple[gspread.Worksheet, List[str]]:
+    """
+    Estrategia 'no expand': reduce filas/columnas si sobran y
+    jamás intenta aumentar columnas. Si faltan campos requeridos
+    pero no hay ancho disponible, se truncan (capping) y se trabaja
+    sólo con la intersección.
+    Devuelve (worksheet, header_final_que_realmente_existe).
+    """
+    # 1) Compactar filas a lo efectivamente usado (libera celdas de la hoja)
+    try:
+        if ws.row_count > max(1, used_rows):
+            ws.resize(rows=max(1, used_rows), cols=ws.col_count)
+    except Exception:
+        pass
+
+    # 2) Leer encabezado actual
+    try:
+        header = ws.row_values(1)
+    except Exception:
+        header = []
+    header = [h for h in header if h]  # no vacíos
+    ncols_current = ws.col_count
+    ncols_used = len(header)
+
+    # 3) Compactar columnas si hay columnas vacías al final (reduce celdas del workbook)
+    if ncols_used > 0 and ncols_current > ncols_used:
+        try:
+            ws.resize(rows=ws.row_count, cols=ncols_used)
+            ncols_current = ws.col_count
+        except Exception:
+            pass
+
+    # 4) Si no hay encabezado, escribir uno truncado al ancho disponible (sin expandir)
+    if not header:
+        base = REQUIRED_COLUMNS[:ncols_current] if ncols_current else []
+        if base:
+            try:
+                # Soporta firma nueva y actual de gspread
+                try:
+                    ws.update(values=[base], range_name="A1")
+                except TypeError:
+                    ws.update("A1", [base])
+        # si ni siquiera esto se puede, retornamos el base calculado (puede ser vacío)
+            except gspread.exceptions.APIError:
+                pass
+        return ws, base
+
+    # 5) Agregar faltantes 'virtualmente' sin expandir: cap al ancho actual
+    missing = [c for c in REQUIRED_COLUMNS if c not in header]
+    if not missing:
+        final_header = header
+    else:
+        proposed = header + missing
+        if len(proposed) > ncols_current:
+            # No hay ancho disponible: cap al ancho actual
+            final_header = proposed[:ncols_current]
+        else:
+            final_header = proposed
+
+    # Actualizar fila 1 sólo si cambia y sin expandir
+    if final_header != header:
+        try:
+            try:
+                ws.update(values=[final_header], range_name="A1")
+            except TypeError:
+                ws.update("A1", [final_header])
+        except gspread.exceptions.APIError:
+            # Si falla, nos quedamos con el header antiguo (no ampliamos)
+            final_header = header
+
+    return ws, final_header
+
+def _align_df_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """
+    Alinea el DF al conjunto real de columnas de la hoja (no forzamos expansión).
+    Numéricas se dejan como NaN si no existen.
+    """
+    out = df.copy()
+    for c in columns:
+        if c not in out.columns:
+            out[c] = "" if c not in ("Precio","Cantidad","Precio_comparable") else pd.NA
+    # sólo devolvemos columnas existentes en la hoja
+    return out[[c for c in columns]]
+
 
 def _create_new_spreadsheet(creds, title: str):
     """Crea un nuevo libro de Google Sheets cuando el actual está lleno"""
@@ -852,10 +943,9 @@ def _create_new_spreadsheet(creds, title: str):
 
 def main() -> None:
     logger.info("Iniciando scraping de precios...")
-    
+
     # 1) Ejecutar scrapers y recolectar
     all_rows: List[Dict] = []
-    
     for name, cls in SCRAPERS.items():
         try:
             logger.info(f"Ejecutando scraper: {name}")
@@ -868,84 +958,82 @@ def main() -> None:
                 logger.warning(f"{name}: No se encontraron productos")
         except Exception as e:
             logger.error(f"Error ejecutando scraper {name}: {e}")
-    
+
     if not all_rows:
         logger.error("No se obtuvieron datos de ningún scraper")
         return
-    
+
     # 2) Consolidado y tipos
     df_all = pd.DataFrame(all_rows)
-    
-    # Tipificación fuerte
     for col in ("Precio", "Cantidad", "Precio_comparable"):
         if col in df_all.columns:
             df_all[col] = pd.to_numeric(df_all[col], errors="coerce")
-    
     df_all = df_all[df_all["Precio"] > 0]
     df_all["FechaConsulta"] = pd.to_datetime(df_all["FechaConsulta"], errors="coerce")
     df_all = df_all.drop_duplicates(subset=KEY_COLS, keep="last")
-    
+
     # 3) Determinar partición mensual
     if df_all["FechaConsulta"].notna().any():
         part = df_all["FechaConsulta"].dt.strftime("%Y%m").iloc[0]
     else:
         part = datetime.now(timezone.utc).strftime("%Y%m")
     target_title = f"{WORKSHEET_NAME}_{part}"
-    
-    # 4) Abrir workbook y hoja mensual
+
+    # 4) Abrir workbook y hoja mensual (sin expandir columnas)
     try:
         sh = _authorize_sheet()
         ws = _ensure_worksheet(sh, target_title)
-        header = _ensure_required_columns(ws)
-        
-        # 5) Leer existente y alinear
+
+        # 5) LEER primero lo existente para conocer cuántas filas reales hay
         prev_df = _get_existing_df(ws)
+        used_rows = 1 + len(prev_df)  # encabezado + datos existentes
+
+        # 6) Compactar filas y fijar encabezado SIN ampliar columnas
+        ws, header = _ensure_required_columns_safe(ws, used_rows=used_rows)
+
+        # 7) Alinear dataframes al header real (intersección; no expande)
         if prev_df.empty:
             prev_df = pd.DataFrame(columns=header)
         prev_df = _align_df_columns(prev_df, header)
-        df_all = _align_df_columns(df_all, header)
-        
-        # 6) Detección de nuevas filas por clave
+        df_all  = _align_df_columns(df_all, header)
+
+        # 8) Detección de nuevas filas por clave
         for c in KEY_COLS:
             if c not in prev_df.columns:
                 prev_df[c] = ""
-                
-        if not prev_df.empty:
-            prev_keys = set(prev_df[KEY_COLS].astype(str).agg('|'.join, axis=1))
-        else:
-            prev_keys = set()
-            
-        all_keys = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
-        mask_new = ~all_keys.isin(prev_keys)
-        new_rows = df_all.loc[mask_new].copy()
-        
+        prev_keys = set(prev_df[KEY_COLS].astype(str).agg('|'.join, axis=1)) if not prev_df.empty else set()
+        all_keys  = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
+        new_rows  = df_all.loc[~all_keys.isin(prev_keys)].copy()
+
         if new_rows.empty:
             logger.info("No hay nuevas filas para agregar")
-            _shrink_grid(ws, nrows=len(prev_df) + 1, ncols=len(header))
+            _shrink_grid(ws, nrows=len(prev_df) + 1, ncols=len(header))  # no ampliar
             return
-        
-        # 7) Ordenar columnas según encabezado y anexar
+
+        # 9) Ordenar columnas según encabezado y anexar
         cols_to_write = [c for c in header if c in new_rows.columns]
         new_rows = new_rows[cols_to_write]
-        
         logger.info(f"Añadiendo {len(new_rows)} nuevas filas")
         _append_rows(ws, new_rows)
-        
-        # 8) Compactar grilla
+
+        # 10) Compactar grilla a lo justo (sin ampliar columnas)
         total_rows = 1 + len(prev_df) + len(new_rows)
         _shrink_grid(ws, nrows=total_rows, ncols=len(header))
-        
+
         logger.info("Proceso completado exitosamente")
-        
+
     except gspread.exceptions.APIError as e:
+        # Con la ruta segura no debería ocurrir; se deja por robustez
         if "limit of 10000000 cells" in str(e):
             logger.error("Límite de celdas alcanzado. Creando nuevo libro...")
             try:
-                # Crear nuevo libro
-                cred = Credentials.from_service_account_file(CREDS_JSON, scopes=[
-                    'https://www.googleapis.com/auth/drive',
-                    'https://www.googleapis.com/auth/spreadsheets',
-                ])
+                cred = Credentials.from_service_account_file(
+                    CREDS_JSON,
+                    scopes=[
+                        'https://www.googleapis.com/auth/drive',
+                        'https://www.googleapis.com/auth/spreadsheets',
+                    ],
+                )
                 new_url = _create_new_spreadsheet(cred, f"{WORKSHEET_NAME}_{part}_backup")
                 logger.info(f"Nuevo libro creado: {new_url}")
             except Exception as create_error:
@@ -954,6 +1042,7 @@ def main() -> None:
             logger.error(f"Error de API de Google Sheets: {e}")
     except Exception as e:
         logger.error(f"Error inesperado: {e}")
+
 
 if __name__ == "__main__":
     main()
