@@ -22,6 +22,74 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
+SHARE_WITH_EMAIL = os.environ.get("SHARE_WITH_EMAIL")
+
+def _drive_service(cred):
+    return build('drive', 'v3', credentials=cred, cache_discovery=False)
+
+def _get_or_create_monthly_spreadsheet(part: str):
+    """
+    Crea o reutiliza un LIBRO mensual llamado '{WORKSHEET_NAME}_{part}' en Drive.
+    Devuelve (sh, ws, file_id). ws es la hoja interna donde escribimos.
+    """
+    scopes = [
+        'https://www.googleapis.com/auth/drive',
+        'https://www.googleapis.com/auth/spreadsheets',
+    ]
+    cred = Credentials.from_service_account_file(CREDS_JSON, scopes=scopes)
+    gc = gspread.authorize(cred)
+    drive = _drive_service(cred)
+
+    book_title = f"{WORKSHEET_NAME}_{part}"
+
+    # 1) Buscar si ya existe
+    try:
+        q = f"name = '{book_title}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false"
+        res = drive.files().list(q=q, spaces='drive', fields='files(id,name)', pageSize=1).execute()
+        files = res.get('files', [])
+        if files:
+            file_id = files[0]['id']
+        else:
+            # 2) Crear si no existe
+            metadata = {
+                'name': book_title,
+                'mimeType': 'application/vnd.google-apps.spreadsheet'
+            }
+            if DRIVE_FOLDER_ID:
+                metadata['parents'] = [DRIVE_FOLDER_ID]
+            created = drive.files().create(body=metadata, fields='id').execute()
+            file_id = created['id']
+
+            # (opcional) Compartir contigo para que veas el libro en tu Drive
+            if SHARE_WITH_EMAIL:
+                drive.permissions().create(
+                    fileId=file_id,
+                    body={'type': 'user', 'role': 'writer', 'emailAddress': SHARE_WITH_EMAIL},
+                    sendNotificationEmail=False
+                ).execute()
+    except HttpError as e:
+        # Fallback mínimo: si falla Drive API, intenta crear con gspread (quedará en el Drive del SA)
+        sh_tmp = gc.create(book_title)
+        file_id = sh_tmp.id
+
+    # 3) Abrir el libro por ID
+    sh = gc.open_by_key(file_id)
+
+    # 4) Asegurar una hoja interna (usa el mismo nombre del mes como hoja)
+    sheet_title = f"{WORKSHEET_NAME}_{part}"
+    try:
+        ws = sh.worksheet(sheet_title)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=sheet_title, rows='2', cols=str(len(REQUIRED_COLUMNS)))
+        ws.update('A1', [REQUIRED_COLUMNS])
+
+    return sh, ws, file_id
+
+
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -942,6 +1010,7 @@ def _create_new_spreadsheet(creds, title: str):
         logger.error(f"Error creando nuevo libro: {e}")
         raise
 
+
 def main() -> None:
     logger.info("Iniciando scraping de precios...")
 
@@ -980,36 +1049,53 @@ def main() -> None:
         part = datetime.now(timezone.utc).strftime("%Y%m")
     target_title = f"{WORKSHEET_NAME}_{part}"
 
-    # 4) Abrir workbook y hoja mensual (sin expandir columnas)
+        # 4) Abrir o crear LIBRO mensual (nuevo libro por mes, no una hoja en el libro madre)
     try:
-        sh = _authorize_sheet()
-        ws = _ensure_worksheet(sh, target_title)
+        sh, ws, file_id = _get_or_create_monthly_spreadsheet(part)
+        header = _ensure_required_columns(ws)
 
-        # 5) LEER primero lo existente para conocer cuántas filas reales hay
+        # 5) Leer existente y alinear
         prev_df = _get_existing_df(ws)
-        used_rows = 1 + len(prev_df)  # encabezado + datos existentes
-
-        # 6) Compactar filas y fijar encabezado SIN ampliar columnas
-        ws, header = _ensure_required_columns_safe(ws, used_rows=used_rows)
-
-        # 7) Alinear dataframes al header real (intersección; no expande)
         if prev_df.empty:
             prev_df = pd.DataFrame(columns=header)
         prev_df = _align_df_columns(prev_df, header)
-        df_all  = _align_df_columns(df_all, header)
+        df_all = _align_df_columns(df_all, header)
 
-        # 8) Detección de nuevas filas por clave
+        # 6) Detección de nuevas filas por clave
         for c in KEY_COLS:
             if c not in prev_df.columns:
                 prev_df[c] = ""
+
         prev_keys = set(prev_df[KEY_COLS].astype(str).agg('|'.join, axis=1)) if not prev_df.empty else set()
-        all_keys  = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
-        new_rows  = df_all.loc[~all_keys.isin(prev_keys)].copy()
+        all_keys = df_all[KEY_COLS].astype(str).agg('|'.join, axis=1)
+        mask_new = ~all_keys.isin(prev_keys)
+        new_rows = df_all.loc[mask_new].copy()
 
         if new_rows.empty:
             logger.info("No hay nuevas filas para agregar")
-            _shrink_grid(ws, nrows=len(prev_df) + 1, ncols=len(header))  # no ampliar
+            _shrink_grid(ws, nrows=len(prev_df) + 1, ncols=len(header))
+            logger.info(f"Libro mensual: https://docs.google.com/spreadsheets/d/{file_id}")
             return
+
+        # 7) Ordenar columnas según encabezado y anexar
+        cols_to_write = [c for c in header if c in new_rows.columns]
+        new_rows = new_rows[cols_to_write]
+
+        logger.info(f"Añadiendo {len(new_rows)} nuevas filas al libro mensual {file_id}")
+        _append_rows(ws, new_rows)
+
+        # 8) Compactar grilla
+        total_rows = 1 + len(prev_df) + len(new_rows)
+        _shrink_grid(ws, nrows=total_rows, ncols=len(header))
+
+        logger.info(f"Proceso completado. Libro mensual: https://docs.google.com/spreadsheets/d/{file_id}")
+
+    except gspread.exceptions.APIError as e:
+        logger.error(f"Error de Google Sheets: {e}")
+    except HttpError as e:
+        logger.error(f"Error de Google Drive API: {e}")
+    except Exception as e:
+        logger.error(f"Error inesperado: {e}")
 
         # 9) Ordenar columnas según encabezado y anexar
         cols_to_write = [c for c in header if c in new_rows.columns]
